@@ -1,7 +1,7 @@
 {
-  "name": "GPT Image Playground",
-  "short_name": "GPT Image",
-  "description": "GPT Image Playground 图像生成工作台",
+  "name": "胡迪视频工作站",
+  "short_name": "胡迪视频工作站",
+  "description": "图片与视频生成工作站",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

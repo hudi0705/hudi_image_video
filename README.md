@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎨 GPT Image Playground
+# 🎨 胡迪视频工作站
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/CookSleep/gpt_image_playground?style=flat-square&color=eab308)](https://github.com/CookSleep/gpt_image_playground/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/CookSleep/gpt_image_playground?style=flat-square&color=3b82f6)](https://github.com/CookSleep/gpt_image_playground/network/members)
@@ -655,7 +655,7 @@ VITE_DEFAULT_API_URL=https://example.com/gpt-image-config.json
 
 ## 📄 许可证 & 致谢
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [GPT Image Playground](https://github.com/CookSleep/gpt_image_playground) 修改，原项目采用 [MIT License](LICENSE) 开源。
 
 特别致谢：[LINUX DO](https://linux.do)
 
