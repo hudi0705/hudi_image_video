@@ -11,6 +11,8 @@ import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
 import AgentWorkspace from './components/AgentWorkspace'
 import InputBar from './components/InputBar'
+import VideoWorkspace from './components/VideoWorkspace'
+import { useWorkMode } from './lib/workMode'
 import DetailModal from './components/DetailModal'
 import Lightbox from './components/Lightbox'
 import SettingsModal from './components/SettingsModal'
@@ -26,6 +28,7 @@ let defaultConfigImportStarted = false
 
 export default function App() {
   const appMode = useStore((s) => s.appMode)
+  const workMode = useWorkMode()
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
   useDockerApiUrlMigrationNotice()
@@ -139,6 +142,8 @@ export default function App() {
       <Header />
       {appMode === 'agent' ? (
         <AgentWorkspace />
+      ) : workMode === 'video' ? (
+        <VideoWorkspace />
       ) : (
         <main data-home-main data-drag-select-surface className="pb-48">
           <div className="safe-area-x max-w-7xl mx-auto">
@@ -147,7 +152,7 @@ export default function App() {
           </div>
         </main>
       )}
-      <InputBar />
+      {appMode === 'agent' || workMode !== 'video' ? <InputBar /> : null}
       <DetailModal />
       <Lightbox />
       <SettingsModal />

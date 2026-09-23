@@ -8,11 +8,36 @@ import HelpModal from './HelpModal'
 import HistoryModal from './HistoryModal'
 import ShotTemplatePanel from './ShotTemplatePanel'
 import { useFavoriteCollectionTitle } from './FavoriteCollections'
+import { setWorkMode, useWorkMode, type WorkMode } from '../lib/workMode'
 import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, SettingsIcon } from './icons'
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
+}
+
+function WorkModeTabs({ className = '' }: { className?: string }) {
+  const workMode = useWorkMode()
+  const setAppMode = useStore((s) => s.setAppMode)
+  const select = (next: WorkMode) => {
+    setWorkMode(next)
+    if (next === 'video') setAppMode('gallery')
+  }
+
+  return (
+    <div className={`flex items-center gap-1 rounded-xl border border-gray-200 bg-gray-100/70 p-1 dark:border-white/[0.08] dark:bg-white/[0.04] ${className}`}>
+      {(['image', 'video'] as const).map((item) => (
+        <button
+          key={item}
+          type="button"
+          onClick={() => select(item)}
+          className={`rounded-lg px-4 py-1.5 text-sm transition-colors ${workMode === item ? 'bg-white font-medium text-gray-900 shadow-sm dark:bg-white/10 dark:text-white' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+        >
+          {item === 'image' ? '生图' : '生视频'}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 function isInstalledPwa() {
@@ -203,6 +228,11 @@ export default function Header() {
               )}
             </div>}
           </div>
+          {appMode !== 'agent' && (
+            <div className="absolute left-1/2 top-1/2 hidden -translate-x-1/2 -translate-y-1/2 md:flex">
+              <WorkModeTabs />
+            </div>
+          )}
           {appMode === 'agent' && activeConversation && (
             <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden sm:flex max-w-[30%]">
               <button
@@ -220,13 +250,7 @@ export default function Header() {
               </button>
             </div>
           )}
-          {showFavoriteCollectionTitle && (
-            <div className="absolute left-1/2 top-1/2 hidden max-w-[30%] -translate-x-1/2 -translate-y-1/2 sm:flex">
-              <div className="truncate rounded px-2 py-1 text-sm font-semibold text-gray-700 dark:text-gray-300" title={favoriteCollectionTitle}>
-                {favoriteCollectionTitle}
-              </div>
-            </div>
-          )}
+
           <div className="hidden sm:flex items-center gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mr-4">
             <button
               type="button"
@@ -311,7 +335,8 @@ export default function Header() {
             </div>
           </div>
         </div>
-        <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 opacity-0 pb-0' : 'max-h-20 opacity-100 pb-2'}`}>
+        <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 opacity-0 pb-0' : 'max-h-32 opacity-100 pb-2'}`}>
+          <WorkModeTabs className="mx-2 mb-2" />
           <div className="grid grid-cols-2 gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mx-2">
             <button
               type="button"
@@ -340,7 +365,7 @@ export default function Header() {
 
       <div className={`safe-area-top invisible pointer-events-none transition-all duration-300 ease-in-out ${appMode === 'agent' && !agentMobileHeaderVisible ? 'max-h-0 sm:max-h-[500px] opacity-0 sm:opacity-100 overflow-hidden sm:overflow-visible' : 'max-h-[500px] opacity-100'}`} aria-hidden="true">
         <div className="safe-header-inner" />
-        <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 pb-0' : 'max-h-20 pb-2'}`}>
+        <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 pb-0' : 'max-h-32 pb-2'}`}>
           <div className="p-1">
             <div className="py-1.5 text-sm">占位</div>
           </div>
