@@ -56,6 +56,9 @@ export default defineConfig(async ({ command, mode }) => {
     },
     server: {
       host: true,
+      watch: {
+        ignored: ['**/*.zip'],
+      },
       proxy:
         devProxyConfig?.enabled
           ? {
