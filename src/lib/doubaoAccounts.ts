@@ -5,10 +5,17 @@ export interface DoubaoAccount {
   dailyQuota: number
   usedToday: number
   quotaDate: string
+  /** 调度器用于按最近使用时间轮换账户。 */
+  lastUsedAt?: number
 }
+
+export const VIDEO_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const
+export type VideoRatio = typeof VIDEO_RATIOS[number]
+export const DEFAULT_VIDEO_RATIO: VideoRatio = '16:9'
 
 export interface DoubaoSettings {
   baseUrl: string
+  ratio: VideoRatio
 }
 
 const ACCOUNTS_KEY = 'gpt-image-doubao-accounts'
@@ -36,7 +43,8 @@ export function remainingQuota(account: DoubaoAccount, today = quotaDate()) {
 export function availableAccounts(accounts: DoubaoAccount[], today = quotaDate()) {
   return accounts
     .map((account) => refreshQuota(account, today))
-    .filter((account) => account.sessionId.trim() && remainingQuota(account, today) > 0)
+    .filter((account) => (account.sessionId.trim() || account.id.trim()) && remainingQuota(account, today) > 0)
+    .sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0))
 }
 
 export function consumeQuota(accounts: DoubaoAccount[], accountId: string, today = quotaDate()) {
@@ -71,8 +79,10 @@ export function normalizeAccounts(value: unknown, today = quotaDate()): DoubaoAc
       dailyQuota,
       usedToday: Math.max(0, Math.floor(Number(item.usedToday) || 0)),
       quotaDate: typeof item.quotaDate === 'string' ? item.quotaDate : today,
+      lastUsedAt: Number.isFinite(Number(item.lastUsedAt)) ? Number(item.lastUsedAt) : 0,
     }, today)
-    return account.sessionId ? [account] : []
+    // 网页登录账号不使用 API Key，凭账号 ID 对应本地 storage_state。
+    return account.id ? [account] : []
   })
 }
 
@@ -92,9 +102,11 @@ export function readDoubaoSettings(): DoubaoSettings {
   try {
     const parsed = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') as unknown
     const baseUrl = isRecord(parsed) && typeof parsed.baseUrl === 'string' ? parsed.baseUrl : ''
-    return { baseUrl }
+    const ratio = isRecord(parsed) && VIDEO_RATIOS.includes(parsed.ratio as VideoRatio)
+      ? parsed.ratio as VideoRatio : DEFAULT_VIDEO_RATIO
+    return { baseUrl, ratio }
   } catch {
-    return { baseUrl: '' }
+    return { baseUrl: '', ratio: DEFAULT_VIDEO_RATIO }
   }
 }
 

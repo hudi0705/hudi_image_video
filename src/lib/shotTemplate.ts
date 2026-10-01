@@ -4,6 +4,7 @@ export interface ParsedShot {
   shot: string
   action: string
   sound: string
+  duration?: number
 }
 
 const FIELD_NAMES = ['镜头', '声音', '音频', '动作', '原文', '字数', '建议时长', '时长', '标题'] as const
@@ -30,6 +31,8 @@ interface Draft {
   shot: string[]
   action: string[]
   sound: string[]
+  index?: number
+  duration?: number
   field: 'shot' | 'sound' | 'action' | 'source' | null
 }
 
@@ -85,12 +88,25 @@ export function parseShotTemplate(input: string): ParsedShot[] {
         current.title = title
         current.field = null
       }
+      const numeric = Number(segment[1])
+      if (Number.isSafeInteger(numeric) && numeric > 0) current.index = numeric
       continue
     }
 
     const field = line.match(FIELD_LINE)
     if (field) {
       const label = field[1]
+      if (label === '建议时长' || label === '时长') {
+        if (!current) {
+          current = blankDraft()
+          drafts.push(current)
+        }
+        const seconds = [...field[2].matchAll(/(\d+(?:\.\d+)?)\s*(?:秒|s\b)/gi)].pop()
+        const duration = Number(seconds?.[1] ?? field[2].trim())
+        if (Number.isFinite(duration) && duration > 0) current.duration = duration
+        current.field = null
+        continue
+      }
       if (IGNORED_LABELS.has(label)) {
         if (current) current.field = null
         continue
@@ -119,14 +135,17 @@ export function parseShotTemplate(input: string): ParsedShot[] {
       shot: joinField(draft.shot),
       action: joinField(draft.action),
       sound: joinField(draft.sound),
+      index: draft.index,
+      duration: draft.duration,
     }))
     .filter((draft) => draft.shot)
     .map((draft, index) => ({
-      index: index + 1,
+      index: draft.index ?? index + 1,
       title: draft.title || `镜头 ${String(index + 1).padStart(2, '0')}`,
       shot: draft.shot,
       action: draft.action,
       sound: draft.sound,
+      ...(draft.duration !== undefined ? { duration: draft.duration } : {}),
     }))
 }
 
@@ -142,9 +161,9 @@ export function buildShotImagePrompt(shot: string, hasStyleImages: boolean, shar
   return parts.join('\n')
 }
 
-export function buildVideoPrompt(action: string, audio: string, sharedPrompt = '') {
+export function buildVideoPrompt(action: string, audio: string, sharedPrompt = '', duration?: number, ratio?: string) {
   const shared = sharedPrompt.trim()
   const motion = action.trim()
   const sound = audio.trim()
-  return [shared, motion && `动作：${motion}`, sound && `音频：${sound}`].filter(Boolean).join('\n')
+  return [shared, motion && `动作：${motion}`, sound && `音频：${sound}`, duration && `时长：${duration}秒`, ratio && `视频比例：${ratio}`].filter(Boolean).join('\n')
 }

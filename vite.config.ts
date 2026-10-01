@@ -56,9 +56,6 @@ export default defineConfig(async ({ command, mode }) => {
     },
     server: {
       host: true,
-      watch: {
-        ignored: ['**/*.zip'],
-      },
       proxy:
         devProxyConfig?.enabled
           ? {
@@ -66,7 +63,7 @@ export default defineConfig(async ({ command, mode }) => {
                 target: devProxyConfig.target,
                 changeOrigin: devProxyConfig.changeOrigin,
                 secure: devProxyConfig.secure,
-                rewrite: (path) =>
+                rewrite: (path: string) =>
                   path.replace(
                     new RegExp(`^${devProxyConfig.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
                     '',

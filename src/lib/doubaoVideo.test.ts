@@ -19,7 +19,7 @@ describe('doubao video response', () => {
     expect(isQuotaError(429, 'too many requests')).toBe(true)
   })
 
-  it('creates a Seedance task and waits until the video url appears', async () => {
+  it.each([undefined, '9:16'] as const)('creates a Seedance task with ratio %s and waits until the video url appears', async (ratio) => {
     const responses = [
       { id: 'task-1', status: 'queued' },
       { id: 'task-1', status: 'running' },
@@ -30,10 +30,15 @@ describe('doubao video response', () => {
       baseUrl: 'https://ark.example/api/v3',
       account: { id: 'a', name: '豆包1', sessionId: 'key', dailyQuota: 5, usedToday: 0, quotaDate: '2026-09-22' } satisfies DoubaoAccount,
       prompt: '动作：推进',
+      duration: 9.2,
+      ratio,
       imageDataUrl: 'data:image/png;base64,AAAA',
       sleep: async () => {},
       now: () => 0,
-      fetchImpl: (async (input: RequestInfo | URL) => {
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST') {
+          expect(JSON.parse(String(init.body))).toMatchObject({ duration: 9.2, ratio: ratio ?? '16:9' })
+        }
         urls.push(String(input))
         const body = responses.shift()
         return new Response(JSON.stringify(body), { status: 200 })

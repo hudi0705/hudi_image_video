@@ -2,5 +2,9 @@ node_modules/
 dist/
 dev-proxy.config.json
 .wrangler/
+data/
+output/
+.playwright-cli/
 .env.local
 .env.*.local
+*.tsbuildinfo

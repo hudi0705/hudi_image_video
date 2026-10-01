@@ -49,6 +49,7 @@ describe('parseShotTemplate', () => {
     expect(shots[0].shot).toBe('一张横向工作台位于画面左侧，钥匙最终落入右侧陌生手里。')
     expect(shots[0].action).toBe('钥匙沿轨道向右滑行。')
     expect(shots[0].sound).toBe('翻页声之后是锁扣重音。')
+    expect(shots[0].duration).toBe(2.7)
     expect(shots[0].shot).not.toContain('字数')
     expect(shots[0].shot).not.toContain('滑行')
   })
@@ -82,6 +83,14 @@ describe('parseShotTemplate', () => {
     expect(parseShotTemplate('声音：只有风声')).toEqual([])
     expect(parseShotTemplate('   ')).toEqual([])
   })
+
+  it('preserves segment numbers and decimal suggested durations', () => {
+    const shots = parseShotTemplate('片段 03\n原文：测试\n字数：55字\n建议时长：55 ÷ 6 = 9.2秒\n镜头：实验室\n动作：翅膀展开\n音频：机械声\n片段 01\n时长：5秒\n镜头：黑板')
+    expect(shots.map((shot) => shot.index)).toEqual([3, 1])
+    expect(shots[0]).toMatchObject({ duration: 9.2, action: '翅膀展开', sound: '机械声' })
+    expect(shots[1].duration).toBe(5)
+    expect(parseShotTemplate('片段 01\n建议时长：未知\n镜头：黑板')[0].duration).toBeUndefined()
+  })
 })
 
 describe('buildVideoPrompt', () => {
@@ -90,6 +99,8 @@ describe('buildVideoPrompt', () => {
     expect(buildVideoPrompt('', '  ')).toBe('')
     expect(buildVideoPrompt(' 河流依次亮起 ', '低频脉冲', '  保持画面风格一致  ')).toBe('保持画面风格一致\n动作：河流依次亮起\n音频：低频脉冲')
     expect(buildVideoPrompt('', '', '  不要字幕  ')).toBe('不要字幕')
+    expect(buildVideoPrompt('展开翅膀', '机械声', '', 9.2)).toBe('动作：展开翅膀\n音频：机械声\n时长：9.2秒')
+    expect(buildVideoPrompt('展开翅膀', '机械声', '', 9.2, '9:16')).toBe('动作：展开翅膀\n音频：机械声\n时长：9.2秒\n视频比例：9:16')
   })
 })
 

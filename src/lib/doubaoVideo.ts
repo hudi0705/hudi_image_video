@@ -4,15 +4,20 @@ import {
   exhaustQuota,
   readAccounts,
   writeAccounts,
+  DEFAULT_VIDEO_RATIO,
   type DoubaoAccount,
+  type VideoRatio,
 } from './doubaoAccounts'
 
 export const DEFAULT_VIDEO_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 export const DEFAULT_VIDEO_MODEL = 'doubao-seedance-2-0'
+export const DEFAULT_LOCAL_DOUBAO_URL = 'http://127.0.0.1:8787'
 const POLL_INTERVAL_MS = 5000
 const MAX_WAIT_MS = 300000
 const SUCCESS_STATES = new Set(['succeeded', 'success', 'completed'])
 const FAILURE_STATES = new Set(['failed', 'cancelled', 'canceled', 'expired'])
+
+export type LocalVideoProgress = { status?: string; url?: string; downloadUrl?: string; taskUrl?: string; requestText?: string; responseText?: string; accountName?: string }
 
 export class DoubaoQuotaError extends Error {
   constructor(message: string) {
@@ -75,6 +80,8 @@ export async function requestDoubaoVideo(options: {
   prompt: string
   imageDataUrl: string
   model?: string
+  duration?: number
+  ratio?: VideoRatio
   fetchImpl?: typeof fetch
   sleep?: (ms: number) => Promise<void>
   now?: () => number
@@ -100,8 +107,8 @@ export async function requestDoubaoVideo(options: {
         { type: 'text', text: prompt },
         { type: 'image_url', image_url: { url: options.imageDataUrl }, role: 'first_frame' },
       ],
-      ratio: '16:9',
-      duration: 10,
+      ratio: options.ratio ?? DEFAULT_VIDEO_RATIO,
+      duration: options.duration ?? 10,
     }),
   })
   const immediateUrl = readVideoUrl(created.payload)
@@ -130,21 +137,69 @@ export async function requestDoubaoVideo(options: {
 }
 
 export async function generateWithAccountRotation(options: {
+  accountId?: string
   baseUrl: string
   prompt: string
   imageDataUrl: string
   model?: string
+  duration?: number
+  ratio?: VideoRatio
   fetchImpl?: typeof fetch
+  onTaskWindow?: (id: string) => void
+  onProgress?: (progress: LocalVideoProgress) => void
 }) {
-  const accounts = availableAccounts(readAccounts())
+  const accounts = availableAccounts(readAccounts()).filter(account => !options.accountId || account.id === options.accountId)
   if (!accounts.length) throw new Error('没有还有今日额度的豆包账户')
 
   let lastMessage = '所有账户今日额度已用完'
   for (const account of accounts) {
+    // 请求前先记录使用时间，避免连续任务总是从列表第一个账户开始。
+    const reservedAt = Date.now()
+    writeAccounts(readAccounts().map((item) =>
+      item.id === account.id ? { ...item, lastUsedAt: reservedAt } : item,
+    ))
     try {
+      const windowId = crypto.randomUUID()
+      options.onTaskWindow?.(windowId)
+      const controller = new AbortController()
+      let polling = false
+      const poll = async () => {
+        if (polling) return
+        polling = true
+        try {
+          const response = await fetch(`${DEFAULT_LOCAL_DOUBAO_URL}/task-window/status?windowId=${encodeURIComponent(windowId)}`, { signal: controller.signal })
+          if (response.ok) {
+            const progress = await response.json()
+            if (!controller.signal.aborted) options.onProgress?.(progress)
+          }
+        } catch { /* The generation response remains authoritative if progress is unavailable. */ }
+        finally { polling = false }
+      }
+      const timer = options.onProgress ? setInterval(() => { void poll() }, 1000) : undefined
+      let local: Response
+      try {
+        local = await fetch(`${DEFAULT_LOCAL_DOUBAO_URL}/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId: account.id, windowId, prompt: options.prompt, imageDataUrl: options.imageDataUrl, ratio: options.ratio ?? DEFAULT_VIDEO_RATIO }),
+        })
+      } finally {
+        clearInterval(timer)
+        controller.abort()
+      }
+      if (local.ok) {
+        const result = await local.json() as LocalVideoProgress
+        if (!result.url && !['needs_attention', 'unconfirmed', 'generating'].includes(result.status || '')) throw new Error('豆包本地服务未返回视频地址')
+        if (result.url) writeAccounts(consumeQuota(readAccounts(), account.id))
+        return { url: result.url || '', downloadUrl: result.url ? `${DEFAULT_LOCAL_DOUBAO_URL}/task-window/video?windowId=${encodeURIComponent(windowId)}` : '', status: result.status || 'completed', taskUrl: result.taskUrl || '', requestText: result.requestText || options.prompt, responseText: result.responseText || '', accountName: result.accountName || account.name }
+      }
+      const localError = await local.json().catch(() => ({})) as { message?: string; code?: string }
+      if (local.status === 401) throw new Error(localError.message || '豆包账号登录已过期')
+      if (local.status !== 404) throw Object.assign(new Error(localError.message || '豆包本地服务失败'), { code: localError.code })
+      if (!account.sessionId.trim()) throw new Error('请启动豆包本地服务并扫码登录账号')
       const url = await requestDoubaoVideo({ ...options, account })
       writeAccounts(consumeQuota(readAccounts(), account.id))
-      return { url, accountName: account.name }
+      return { url, status: 'completed', accountName: account.name }
     } catch (err) {
       if (!(err instanceof DoubaoQuotaError)) throw err
       writeAccounts(exhaustQuota(readAccounts(), account.id))

@@ -1,7 +1,9 @@
 import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'
+import type { VideoSource } from './videoFileSave'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 3
+const DB_VERSION = 4
+const STORE_VIDEO_SOURCES = 'videoSources'
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
 const STORE_THUMBNAILS = 'thumbnails'
@@ -17,6 +19,9 @@ function openDB(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = (e) => {
       const db = (e.target as IDBOpenDBRequest).result
+      if (!db.objectStoreNames.contains(STORE_VIDEO_SOURCES)) {
+        db.createObjectStore(STORE_VIDEO_SOURCES, { keyPath: 'id' })
+      }
       if (!db.objectStoreNames.contains(STORE_TASKS)) {
         db.createObjectStore(STORE_TASKS, { keyPath: 'id' })
       }
@@ -30,7 +35,10 @@ function openDB(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_AGENT_CONVERSATIONS, { keyPath: 'id' })
       }
     }
-    req.onsuccess = () => resolve(req.result)
+    req.onsuccess = () => {
+      req.result.onversionchange = () => req.result.close()
+      resolve(req.result)
+    }
     req.onerror = () => reject(req.error)
   })
 }
@@ -54,6 +62,20 @@ function dbTransaction<T>(
 
 // ===== Tasks =====
 
+export async function putVideoSource(taskId: string, imageId: string, source: VideoSource) {
+  await openDB().then(db => new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_VIDEO_SOURCES, 'readwrite')
+    tx.objectStore(STORE_VIDEO_SOURCES).put({ id: `${taskId}:${imageId}`, ...source })
+    tx.oncomplete = () => { db.close(); resolve() }
+    tx.onerror = () => { db.close(); reject(tx.error) }
+    tx.onabort = () => { db.close(); reject(tx.error) }
+  }))
+}
+
+export function getVideoSource(taskId: string, imageId: string): Promise<VideoSource | undefined> {
+  return dbTransaction(STORE_VIDEO_SOURCES, 'readonly', s => s.get(`${taskId}:${imageId}`))
+}
+
 export function getAllTasks(): Promise<TaskRecord[]> {
   return dbTransaction(STORE_TASKS, 'readonly', (s) => s.getAll())
 }
@@ -63,17 +85,27 @@ export function putTask(task: TaskRecord): Promise<IDBValidKey> {
 }
 
 export function deleteTask(id: string): Promise<undefined> {
-  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+  return openDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_TASKS, STORE_VIDEO_SOURCES], 'readwrite')
+    tx.objectStore(STORE_TASKS).delete(id)
+    tx.objectStore(STORE_VIDEO_SOURCES).delete(IDBKeyRange.bound(`${id}:`, `${id}:\uffff`))
+    tx.oncomplete = () => { db.close(); resolve(undefined) }
+    tx.onerror = () => { db.close(); reject(tx.error) }
+    tx.onabort = () => { db.close(); reject(tx.error) }
+  }))
 }
 
 export function commitTaskDeletion(deletedTaskIds: string[], updatedTasks: TaskRecord[], updatedConversations: AgentConversation[]): Promise<undefined> {
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_TASKS, STORE_AGENT_CONVERSATIONS], 'readwrite')
+        const tx = db.transaction([STORE_TASKS, STORE_AGENT_CONVERSATIONS, STORE_VIDEO_SOURCES], 'readwrite')
         const taskStore = tx.objectStore(STORE_TASKS)
         const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
-        for (const id of deletedTaskIds) taskStore.delete(id)
+        for (const id of deletedTaskIds) {
+          taskStore.delete(id)
+          tx.objectStore(STORE_VIDEO_SOURCES).delete(IDBKeyRange.bound(`${id}:`, `${id}:\uffff`))
+        }
         for (const task of updatedTasks) taskStore.put(task)
         for (const conversation of updatedConversations) conversationStore.put(conversation)
         tx.oncomplete = () => resolve(undefined)
@@ -84,7 +116,14 @@ export function commitTaskDeletion(deletedTaskIds: string[], updatedTasks: TaskR
 }
 
 export function clearTasks(): Promise<undefined> {
-  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.clear())
+  return openDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_TASKS, STORE_VIDEO_SOURCES], 'readwrite')
+    tx.objectStore(STORE_TASKS).clear()
+    tx.objectStore(STORE_VIDEO_SOURCES).clear()
+    tx.oncomplete = () => { db.close(); resolve(undefined) }
+    tx.onerror = () => { db.close(); reject(tx.error) }
+    tx.onabort = () => { db.close(); reject(tx.error) }
+  }))
 }
 
 // ===== Agent conversations =====

@@ -259,6 +259,10 @@ export interface TaskRecord {
   shotAction?: string
   /** 模板里的音频，用于图生视频 */
   shotAudio?: string
+  /** 图生视频时长，单位为秒 */
+  shotDuration?: number
+  /** 图生视频选用的首帧，默认使用第一张输出图片 */
+  shotVideoImageId?: string
   /** Agent 对话 ID */
   agentConversationId?: string
   /** Agent 轮次 ID */

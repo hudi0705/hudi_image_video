@@ -44,7 +44,9 @@ import {
   clearImages,
   storeImage,
   storeImageWithSize,
+  putVideoSource,
 } from './lib/db'
+import type { VideoSource } from './lib/videoFileSave'
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
@@ -71,6 +73,8 @@ import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAge
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
 import { buildShotImagePrompt } from './lib/shotTemplate'
 import { readImageBatchSize, runInBatches } from './lib/imageBatch'
+import { getShotImageMime, parseShotProjectFolder } from './lib/shotProjectImport'
+import { loadImage } from './lib/canvasImage'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -1768,7 +1772,70 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   executeTask(taskId)
 }
 
-export async function submitShotBatch(shots: Array<{ shot: string; action?: string; sound?: string }>, styleImages: InputImage[], projectName = '', sharedPrompt = '') {
+export async function importShotProjectFolder(files: File[], onProgress?: (completed: number, total: number) => void, sources?: Map<string, VideoSource>) {
+  const project = parseShotProjectFolder(files)
+  if (!project.shots.length) throw new Error('未找到镜头图片，请选择包含「镜头1、镜头2…」子文件夹的项目文件夹')
+  const batchId = genId()
+  const createdAt = Date.now()
+  const total = project.shots.reduce((count, shot) => count + shot.files.length, 0)
+  let completed = 0
+  let failedImages = 0
+  let importedShots = 0
+  let importedImages = 0
+  for (const shot of project.shots) {
+    const outputImages: string[] = []
+    const taskId = genId()
+    for (const file of shot.files) {
+      let dataUrl: string
+      try {
+        dataUrl = await blobToDataUrl(file, getShotImageMime(file))
+        await loadImage(dataUrl)
+      } catch {
+        failedImages += 1
+        onProgress?.(++completed, total)
+        continue
+      }
+      const id = await storeImage(dataUrl, 'upload')
+      cacheImage(id, dataUrl)
+      const source = sources?.get(file.webkitRelativePath)
+      if (source && !outputImages.includes(id)) await putVideoSource(taskId, id, source)
+      if (!outputImages.includes(id)) outputImages.push(id)
+      importedImages += 1
+      onProgress?.(++completed, total)
+    }
+    if (!outputImages.length) continue
+    const task: TaskRecord = {
+      id: taskId, prompt: `镜头${shot.index}（导入图片）`, params: { ...DEFAULT_PARAMS },
+      inputImageIds: [], outputImages, status: 'done', error: null,
+      createdAt: createdAt - importedShots, finishedAt: createdAt, elapsed: null,
+      sourceMode: 'gallery', shotProjectName: project.projectName,
+      shotBatchId: batchId, shotIndex: shot.index, shotAction: '', shotAudio: '',
+    }
+    await putTask(task)
+    const latest = useStore.getState()
+    latest.setTasks([task, ...latest.tasks])
+    importedShots += 1
+  }
+  if (!importedShots) throw new Error('镜头文件夹中的图片均无法读取，请检查文件格式或是否损坏')
+  return { importedShots, importedImages, failedImages, ignoredImages: project.ignoredImages }
+}
+
+export async function selectShotVideoImage(taskId: string, imageId: string) {
+  const task = useStore.getState().tasks.find((item) => item.id === taskId)
+  if (!task || !task.outputImages.includes(imageId)) return
+  await putTask({ ...task, shotVideoImageId: imageId })
+  const latest = useStore.getState()
+  latest.setTasks(latest.tasks.map((item) => item.id === taskId ? { ...item, shotVideoImageId: imageId } : item))
+}
+
+export async function updateShotVideoDetails(updates: Array<{ id: string; shotAction?: string; shotAudio?: string; shotDuration?: number }>) {
+  const patches = new Map(updates.map(({ id, ...patch }) => [id, patch]))
+  const changed = useStore.getState().tasks.filter((task) => patches.has(task.id)).map((task) => ({ ...task, ...patches.get(task.id) }))
+  useStore.setState((state) => ({ tasks: state.tasks.map((task) => patches.has(task.id) ? { ...task, ...patches.get(task.id) } : task) }))
+  await Promise.all(changed.map((task) => putTask(task)))
+}
+
+export async function submitShotBatch(shots: Array<{ index?: number; shot: string; action?: string; sound?: string; duration?: number }>, styleImages: InputImage[], projectName = '', sharedPrompt = '') {
   const state = useStore.getState()
   const normalizedSettings = normalizeSettings(state.settings)
   const activeProfile = getActiveApiProfile(state.settings)
@@ -1785,6 +1852,8 @@ export async function submitShotBatch(shots: Array<{ shot: string; action?: stri
       prompt: buildShotImagePrompt(shot.shot, styleImages.length > 0, sharedPrompt).trim(),
       action: shot.action?.trim() || '',
       sound: shot.sound?.trim() || '',
+      index: shot.index,
+      duration: shot.duration,
     }))
     .filter((shot) => shot.prompt)
   if (!prompts.length) {
@@ -1840,9 +1909,10 @@ export async function submitShotBatch(shots: Array<{ shot: string; action?: stri
       sourceMode: 'gallery',
       shotProjectName,
       shotBatchId: batchId,
-      shotIndex: index + 1,
+      shotIndex: shot.index ?? index + 1,
       shotAction: shot.action,
       shotAudio: shot.sound,
+      shotDuration: shot.duration,
     }
   })
 
