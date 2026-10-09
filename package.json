@@ -11,7 +11,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "commit": "node scripts/commit.mjs",
+    "commit:list": "node scripts/commit.mjs --list"
   },
   "dependencies": {
     "@fal-ai/client": "^1.10.0",
