@@ -19,6 +19,7 @@ import SettingsModal from './components/SettingsModal'
 import ConfirmDialog from './components/ConfirmDialog'
 import Toast from './components/Toast'
 import MaskEditorModal from './components/MaskEditorModal'
+import SketchBoardModal from './components/SketchBoardModal'
 import ImageContextMenu from './components/ImageContextMenu'
 import SupportPromptModal from './components/SupportPromptModal'
 import { FavoriteCollectionPickerModal, FavoriteCollectionsView, ManageCollectionsModal } from './components/FavoriteCollections'
@@ -162,6 +163,7 @@ export default function App() {
       <ManageCollectionsModal />
       <Toast />
       <MaskEditorModal />
+      <SketchBoardModal />
       <ImageContextMenu />
     </>
   )
