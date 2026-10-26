@@ -19,6 +19,7 @@ import { getContentEditableCursor, getContentEditablePlainText, getContentEditab
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
 import SizePickerModal from './SizePickerModal'
+import PromptPolicyModal from './PromptPolicyModal'
 import { CloseIcon, CollapseIcon, ExpandIcon, SketchIcon } from './icons'
 import { CommentBadge } from './CommentMarks'
 import ButtonTooltip from './input/buttonTooltip'
@@ -334,6 +335,8 @@ export default function InputBar() {
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
   const [showUploadMenu, setShowUploadMenu] = useState(false)
+  const [showPolicyCheck, setShowPolicyCheck] = useState(false)
+  const [policyCheckHover, setPolicyCheckHover] = useState(false)
   const [maskPreviewUrl, setMaskPreviewUrl] = useState('')
   const [imageDragIndex, setImageDragIndex] = useState<number | null>(null)
   const [imageDragOverIndex, setImageDragOverIndex] = useState<number | null>(null)
@@ -1538,6 +1541,36 @@ export default function InputBar() {
   }
 
   // 桌面端与移动端共用的“添加图片”按钮与菜单，移动端额外提供拍照
+  // 检查提示词是否违反 OpenAI / 豆包的生图规则
+  const renderPolicyCheckButton = (mobile: boolean) => (
+    <div
+      className="relative flex-shrink-0"
+      onMouseEnter={() => setPolicyCheckHover(true)}
+      onMouseLeave={() => setPolicyCheckHover(false)}
+    >
+      {!mobile && <ButtonTooltip visible={policyCheckHover} text="检查提示词违规" />}
+      <button
+        onClick={() => {
+          if (activeAgentIsRunning) return
+          setPolicyCheckHover(false)
+          setShowPolicyCheck(true)
+        }}
+        disabled={activeAgentIsRunning}
+        className={`p-2.5 rounded-xl transition-all shadow-sm ${
+          activeAgentIsRunning
+            ? 'bg-gray-200 dark:bg-white/[0.04] text-gray-300 dark:text-gray-500 cursor-not-allowed'
+            : 'bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 hover:shadow'
+        }`}
+        aria-label="检查提示词违规"
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          <path d="M12 3l7 3v5.5c0 4.5-3 7.6-7 9.5-4-1.9-7-5-7-9.5V6z" />
+          <path d="M9.2 12.2l2 2 3.6-3.9" />
+        </svg>
+      </button>
+    </div>
+  )
+
   const renderAddImageButton = (mobile: boolean) => (
     <div
       data-add-image-menu
@@ -1723,6 +1756,16 @@ export default function InputBar() {
           onClose={() => setShowSizePicker(false)}
           allowAuto={!isFalTextToImage}
           codexCli={activeProfile.codexCli}
+        />
+      )}
+
+      {showPolicyCheck && (
+        <PromptPolicyModal
+          prompt={stripImageMentionMarkers(prompt)}
+          referenceCount={inputImages.length}
+          settings={settings}
+          profile={activeProfile}
+          onClose={() => setShowPolicyCheck(false)}
         />
       )}
 
@@ -1929,6 +1972,7 @@ export default function InputBar() {
               {renderParams()}
 
               <div className="flex gap-2 flex-shrink-0">
+                {renderPolicyCheckButton(false)}
                 {renderAddImageButton(false)}
                 <div
                   className="relative"
@@ -1972,6 +2016,7 @@ export default function InputBar() {
               </div>
 
               <div className="flex items-center gap-2">
+                {renderPolicyCheckButton(true)}
                 {renderAddImageButton(true)}
                 <div
                   className="relative flex-1"

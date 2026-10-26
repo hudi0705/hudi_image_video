@@ -2,6 +2,8 @@ import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiP
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import { appendStreamingFormatHint, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendImageToolDroppedHint, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
+import { buildPolicyReviewInput, buildPolicyReviewInstructions } from './promptPolicyAiCheck'
+import type { PolicySet } from './promptPolicyCheck'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
 
@@ -707,6 +709,63 @@ export async function callAgentConversationTitleApi(opts: {
     const payload = normalizeResponsePayload(await response.json())
     if (!payload) throw new Error('Agent 标题接口返回格式无效')
     return parseAgentConversationTitleXml(extractText(payload))
+  } finally {
+    clearTimeout(timeoutId)
+    signal?.removeEventListener('abort', abortFromCaller)
+  }
+}
+
+/**
+ * 提示词 AI 深度检查：一次性文本调用，返回模型原始文本，解析交给调用方。
+ * 结构与 callAgentConversationTitleApi 保持一致，只是超时上限压到 60 秒，避免审核请求卡太久。
+ */
+export async function callPromptPolicyReviewApi(opts: {
+  settings: AppSettings
+  profile: ApiProfile
+  text: string
+  policySet: PolicySet
+  referenceCount: number
+  signal?: AbortSignal
+}): Promise<string> {
+  // settings 保留在签名里，与其它一次性调用保持一致的调用形态（当前请求不需要读取全局设置）
+  const { profile, text, policySet, referenceCount, signal } = opts
+  const proxyConfig = readClientDevProxyConfig()
+  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
+  const controller = new AbortController()
+  const timeoutSeconds = Math.min(profile.timeout, 60)
+  const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000)
+  const abortFromCaller = () => controller.abort()
+  if (signal?.aborted) controller.abort()
+  signal?.addEventListener('abort', abortFromCaller, { once: true })
+
+  try {
+    const body: Record<string, unknown> = {
+      model: profile.model,
+      instructions: buildPolicyReviewInstructions(policySet),
+      input: [
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: buildPolicyReviewInput(text, referenceCount) }],
+        },
+      ],
+    }
+    if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
+
+    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+      method: 'POST',
+      headers: createHeaders(profile),
+      cache: 'no-store',
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(await getApiErrorMessage(response))
+    }
+
+    const payload = normalizeResponsePayload(await response.json())
+    if (!payload) throw new Error('AI 检查接口返回格式无效')
+    return extractText(payload)
   } finally {
     clearTimeout(timeoutId)
     signal?.removeEventListener('abort', abortFromCaller)
