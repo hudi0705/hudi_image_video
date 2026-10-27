@@ -9,3 +9,6 @@ output/
 .env.*.local
 *.tsbuildinfo
 .claude/
+.workbuddy/
+.qa-r2*
+qa-r2.mjs
