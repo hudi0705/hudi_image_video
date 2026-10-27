@@ -169,6 +169,16 @@ export interface AppSettings {
   agentApiConfigMode: AgentApiConfigMode
   agentTextProfileId?: string | null
   agentImageProfileId?: string | null
+  /** 生文配置：是否与生图配置分开使用独立的文本模型接口 */
+  textApiEnabled: boolean
+  /** 生文配置的接口地址；留空时沿用生图配置 */
+  textApiBaseUrl: string
+  /** 生文配置的 API Key；留空时沿用生图配置 */
+  textApiKey: string
+  /** 生文配置的文本模型；留空时沿用生图配置 */
+  textApiModel: string
+  /** 生文配置的请求超时（秒）；0 表示沿用生图配置 */
+  textApiTimeout: number
   profiles: ApiProfile[]
   activeProfileId: string
 }
@@ -228,6 +238,37 @@ export interface AgentInputDraft {
 // ===== 任务记录 =====
 
 export type TaskStatus = 'running' | 'done' | 'error'
+
+export interface VideoTaskRecord {
+  id: string
+  imageId: string
+  shotIndex?: number
+  accountId?: string
+  windowId?: string
+  apiTaskId?: string
+  baseUrl?: string
+  status: string
+  statusText: string
+  requestText: string
+  responseText: string
+  failureReason?: string
+  taskUrl: string
+  url: string
+  downloadUrl: string
+  tracking: boolean
+  retryable: boolean
+  uncertain: boolean
+  saveState: 'pending' | 'saving' | 'saved' | 'failed'
+  savedPath?: string
+}
+
+export type VideoShot = TaskRecord & {
+  action: string
+  audio: string
+  imageId: string
+  videoPrompt: string
+  shotDuration: number
+}
 
 export interface TaskRecord {
   id: string
@@ -299,6 +340,10 @@ export interface TaskRecord {
   shotBatchId?: string
   /** 从 1 开始的镜头序号，导出文件夹为「镜头N」 */
   shotIndex?: number
+  /** 当前镜头的通用生图提示词，单独保存以便编辑 */
+  shotSharedPrompt?: string
+  /** 当前镜头的画面与镜头语言 */
+  shotPrompt?: string
   /** 模板里的动作，用于图生视频 */
   shotAction?: string
   /** 模板里的音频，用于图生视频 */
@@ -307,6 +352,8 @@ export interface TaskRecord {
   shotDuration?: number
   /** 图生视频选用的首帧，默认使用第一张输出图片 */
   shotVideoImageId?: string
+  /** 通过普通文件夹导入时记录 MP4 是否存在，关联目录后改为实时检测 */
+  shotHasVideo?: boolean
   /** Agent 对话 ID */
   agentConversationId?: string
   /** Agent 轮次 ID */
