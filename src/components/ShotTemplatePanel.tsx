@@ -2,12 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { createInputImageFromFile, submitShotBatch, useStore } from '../store'
 import type { InputImage } from '../types'
-import { parseShotTemplate } from '../lib/shotTemplate'
+import { buildShotImagePrompt, parseShotTemplate } from '../lib/shotTemplate'
+import { POLICY_SETS, type PolicySet } from '../lib/promptPolicyCheck'
+import { buildShotPolicyReport } from '../lib/shotPolicyCheck'
 import { cacheImage } from '../lib/imageCache'
 import { getImage } from '../lib/db'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { CloseIcon } from './icons'
+import {
+  ShotPolicyBadge,
+  ShotPolicyDetail,
+  ShotPolicySharedBlock,
+  ShotPolicySummary,
+} from './ShotPolicyCheckResult'
 
 const TEMPLATE_KEY = 'gpt-image-shot-template'
 const STYLE_IDS_KEY = 'gpt-image-shot-style-ids'
@@ -39,6 +47,7 @@ function readStyleIds() {
 export default function ShotTemplatePanel({ onClose }: ShotTemplatePanelProps) {
   const showToast = useStore((s) => s.showToast)
   const imageCount = useStore((s) => s.params.n)
+  const settings = useStore((s) => s.settings)
   const modalRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const [template, setTemplate] = useState(() => localStorage.getItem(TEMPLATE_KEY) || '')
@@ -48,7 +57,22 @@ export default function ShotTemplatePanel({ onClose }: ShotTemplatePanelProps) {
   const [stylesReady, setStylesReady] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  // 批量违规检查：只在用户点过「检查提示词」之后才展示结果，
+  // 之后文本或规则集变化都用同一份来源重新计算（纯本地，无网络）
+  const [policyChecked, setPolicyChecked] = useState(false)
+  const [policySetId, setPolicySetId] = useState<PolicySet['id']>('openai')
+  const [expandedShotKeys, setExpandedShotKeys] = useState<Record<string, boolean>>({})
   const shots = useMemo(() => parseShotTemplate(template), [template])
+  const policyActiveSet = useMemo(
+    () => POLICY_SETS.find((set) => set.id === policySetId) || POLICY_SETS[0],
+    [policySetId],
+  )
+  const policyReport = useMemo(
+    () => (policyChecked && (shots.length > 0 || sharedPrompt.trim())
+      ? buildShotPolicyReport(sharedPrompt, shots, policySetId)
+      : null),
+    [policyChecked, sharedPrompt, shots, policySetId],
+  )
 
   useCloseOnEscape(true, onClose)
   usePreventBackgroundScroll(true, modalRef)
@@ -130,6 +154,17 @@ export default function ShotTemplatePanel({ onClose }: ShotTemplatePanelProps) {
       }
       return next
     })
+  }
+
+  /** 展开 / 收起批量检查结果。收起时清空各镜头的展开状态，避免下次打开是散的 */
+  function togglePolicyCheck() {
+    const next = !policyChecked
+    setPolicyChecked(next)
+    if (!next) setExpandedShotKeys({})
+  }
+
+  function toggleShotDetail(key: string) {
+    setExpandedShotKeys((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
   async function handleSubmit() {
@@ -266,26 +301,97 @@ export default function ShotTemplatePanel({ onClose }: ShotTemplatePanelProps) {
           </section>
 
           <section>
-            <h4 className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-200">
-              解析结果{shots.length ? ` · ${shots.length} 个镜头` : ''}
-            </h4>
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <h4 className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                解析结果{shots.length ? ` · ${shots.length} 个镜头` : ''}
+              </h4>
+              {/* 次要按钮：批量检查只是给用户提示，不影响提交 */}
+              <button
+                type="button"
+                onClick={togglePolicyCheck}
+                disabled={!shots.length && !sharedPrompt.trim()}
+                aria-pressed={policyChecked}
+                title={policyChecked ? '收起检查结果' : '用本地规则检查统一提示词与每个镜头的画面描述'}
+                className="shrink-0 rounded-xl border border-gray-200 bg-white px-2.5 py-1 text-[12px] font-medium text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/[0.1] dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/[0.06]"
+              >
+                {policyChecked ? '收起检查结果' : '检查提示词'}
+              </button>
+            </div>
             {sharedPrompt.trim() && (
               <p className="mb-2 text-xs leading-5 text-gray-500 dark:text-gray-400">每个镜头都会先带上统一提示词。</p>
             )}
+            {policyReport && (
+              <ShotPolicySummary report={policyReport} onSwitchSet={setPolicySetId} />
+            )}
+            {policyReport?.shared && (
+              <ShotPolicySharedBlock
+                text={policyReport.shared.section.text}
+                hits={policyReport.shared.result.hits}
+                shotCount={shots.length}
+              />
+            )}
             {shots.length ? (
               <div className="space-y-2">
-                {shots.map((shot) => (
-                  <article key={`${shot.index}-${shot.title}`} className="rounded-2xl bg-gray-50 px-3 py-2 dark:bg-white/[0.04]">
-                    <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{shot.title}</div>
-                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800 dark:text-gray-100">{shot.shot}</p>
-                    {shot.action && (
-                      <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-gray-500 dark:text-gray-400">动作：{shot.action}</p>
-                    )}
-                    {shot.sound && (
-                      <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-gray-500 dark:text-gray-400">音频：{shot.sound}</p>
-                    )}
-                  </article>
-                ))}
+                {shots.map((shot, position) => {
+                  const group = policyReport?.shots[position] ?? null
+                  const hasRisk = Boolean(group && group.hits.length > 0)
+                  const expanded = Boolean(group && expandedShotKeys[group.key])
+                  return (
+                    <article
+                      key={`${shot.index}-${shot.title}`}
+                      className={`rounded-2xl px-3 py-2 ${hasRisk
+                        ? 'bg-red-50/60 ring-1 ring-red-100 dark:bg-red-500/[0.06] dark:ring-red-500/20'
+                        : 'bg-gray-50 dark:bg-white/[0.04]'}`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{shot.title}</div>
+                          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800 dark:text-gray-100">{shot.shot}</p>
+                          {shot.action && (
+                            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-gray-500 dark:text-gray-400">动作：{shot.action}</p>
+                          )}
+                          {shot.sound && (
+                            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-gray-500 dark:text-gray-400">
+                              音频：{shot.sound}
+                              {/* 声音不参与检查，但和「动作」行长得一样，必须就地标注，
+                                  否则「音频：自杀的字幕」+ 绿色「通过」会被理解成没问题 */}
+                              {policyChecked && (
+                                <span
+                                  title="声音只用于人工核对，不进入画面提示词"
+                                  className="ml-1.5 inline-block rounded-md bg-gray-200/70 px-1.5 py-0.5 align-middle text-[10.5px] font-medium text-gray-500 dark:bg-white/[0.1] dark:text-gray-400"
+                                >
+                                  未检查
+                                </span>
+                              )}
+                            </p>
+                          )}
+                        </div>
+                        {group && <ShotPolicyBadge group={group} />}
+                      </div>
+                      {group && hasRisk && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => toggleShotDetail(group.key)}
+                            aria-expanded={expanded}
+                            className="mt-1.5 text-[12px] font-medium text-red-600 transition-colors hover:text-red-700 dark:text-red-300 dark:hover:text-red-200"
+                          >
+                            {expanded ? '收起详情' : `查看 ${group.hits.length} 项`}
+                          </button>
+                          {expanded && (
+                            <ShotPolicyDetail
+                              group={group}
+                              imagePrompt={buildShotImagePrompt(shot.shot, styleImages.length > 0, sharedPrompt)}
+                              policySet={policyActiveSet}
+                              settings={settings}
+                              referenceCount={styleImages.length}
+                            />
+                          )}
+                        </>
+                      )}
+                    </article>
+                  )
+                })}
               </div>
             ) : (
               <p className="text-sm text-gray-400">还没有解析到镜头。</p>

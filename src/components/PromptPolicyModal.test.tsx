@@ -154,7 +154,7 @@ test('没有可用接口配置时 AI 深度检查按钮禁用', () => {
   try {
     const button = buttonByText('AI 深度检查') as HTMLButtonElement
     expect(button.disabled).toBe(true)
-    expect(button.getAttribute('title')).toContain('API Key')
+    expect(button.getAttribute('title')).toContain('文本模型')
   } finally {
     view.unmount()
   }
@@ -163,8 +163,9 @@ test('没有可用接口配置时 AI 深度检查按钮禁用', () => {
 test('配置缺 apiKey 时 AI 深度检查按钮禁用', () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   const noKeyProfile = { ...testProfile, apiKey: '' } as ApiProfile
+  const noKeySettings = { profiles: [noKeyProfile], activeProfileId: noKeyProfile.id } as unknown as AppSettings
   const view = mount(
-    <PromptPolicyModal prompt="一座海边的灯塔" referenceCount={0} settings={testSettings} profile={noKeyProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="一座海边的灯塔" referenceCount={0} settings={noKeySettings} onClose={vi.fn()} />,
   )
   try {
     expect((buttonByText('AI 深度检查') as HTMLButtonElement).disabled).toBe(true)
@@ -182,7 +183,7 @@ test('AI 结果出现后自动滚进结果区可视范围', async () => {
   const scrollSpy = vi.fn()
   proto.scrollIntoView = scrollSpy
   const view = mount(
-    <PromptPolicyModal prompt="一座海边的灯塔" referenceCount={0} settings={testSettings} profile={testProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="一座海边的灯塔" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
   )
   try {
     await act(async () => { buttonByText('AI 深度检查')!.click() })
@@ -199,7 +200,7 @@ test('AI 返回全空条目时给出兜底说明而不是空白面板', async ()
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   reviewMock.mockResolvedValue('{"risk":"warn","summary":"","items":[{},null]}')
   const view = mount(
-    <PromptPolicyModal prompt="两个人在昏暗的房间里靠得很近" referenceCount={0} settings={testSettings} profile={testProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="两个人在昏暗的房间里靠得很近" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
   )
   try {
     await act(async () => { buttonByText('AI 深度检查')!.click() })
@@ -229,7 +230,7 @@ test('AI 深度检查成功后展示结果区与等级徽标', async () => {
     ],
   }))
   const view = mount(
-    <PromptPolicyModal prompt="画一张 Taylor Swift 的演唱会照片" referenceCount={0} settings={testSettings} profile={testProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="画一张 Taylor Swift 的演唱会照片" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
   )
   try {
     await act(async () => { buttonByText('AI 深度检查')!.click() })
@@ -251,7 +252,7 @@ test('AI 判定安全且无条目时给出语义层无风险结论', async () =>
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   reviewMock.mockResolvedValue('{"risk":"safe","summary":"没有语义层风险","items":[]}')
   const view = mount(
-    <PromptPolicyModal prompt="一只橘猫趴在窗台上晒太阳" referenceCount={0} settings={testSettings} profile={testProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="一只橘猫趴在窗台上晒太阳" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
   )
   try {
     await act(async () => { buttonByText('AI 深度检查')!.click() })
@@ -267,7 +268,7 @@ test('AI 检查失败时显示错误且保留本地结果', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   reviewMock.mockRejectedValue(new Error('接口返回 500'))
   const view = mount(
-    <PromptPolicyModal prompt="皮卡丘" referenceCount={0} settings={testSettings} profile={testProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="皮卡丘" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
   )
   try {
     act(() => { buttonByText('开始检查')!.click() })
@@ -290,7 +291,7 @@ test('修改文本后清空 AI 结果', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   reviewMock.mockResolvedValue('{"risk":"warn","summary":"气氛暧昧","items":[]}')
   const view = mount(
-    <PromptPolicyModal prompt="两个人在昏暗的房间里靠得很近" referenceCount={0} settings={testSettings} profile={testProfile} onClose={vi.fn()} />,
+    <PromptPolicyModal prompt="两个人在昏暗的房间里靠得很近" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
   )
   try {
     await act(async () => { buttonByText('AI 深度检查')!.click() })
@@ -303,6 +304,69 @@ test('修改文本后清空 AI 结果', async () => {
       textarea.dispatchEvent(new Event('input', { bubbles: true }))
     })
     expect(document.body.textContent).not.toContain('气氛暧昧')
+    expect(document.body.textContent).not.toContain('AI 深度检查结果')
+  } finally {
+    view.unmount()
+  }
+})
+
+test('生文配置缺失时 AI 深度检查按钮禁用并提示指定文本模型', () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // 未启用独立生文配置时沿用生图配置，生图配置没有 Key 就视为文本能力不可用
+  const emptyKeyProfile = { ...testProfile, apiKey: '' } as ApiProfile
+  const settings = { profiles: [emptyKeyProfile], activeProfileId: emptyKeyProfile.id } as unknown as AppSettings
+  const view = mount(<PromptPolicyModal prompt="一座海边的灯塔" referenceCount={0} settings={settings} onClose={vi.fn()} />)
+  try {
+    const button = buttonByText('AI 深度检查') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(button.getAttribute('title')).toContain('文本模型')
+  } finally {
+    view.unmount()
+  }
+})
+
+test('启用独立生文配置后即使生图配置没有 Key 也能跑 AI 深度检查', () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const emptyKeyProfile = { ...testProfile, apiKey: '' } as ApiProfile
+  const settings = {
+    profiles: [emptyKeyProfile],
+    activeProfileId: emptyKeyProfile.id,
+    textApiEnabled: true,
+    textApiBaseUrl: 'https://text.example.com/v1',
+    textApiKey: 'sk-text',
+    textApiModel: 'gpt-5',
+  } as unknown as AppSettings
+  const view = mount(<PromptPolicyModal prompt="一座海边的灯塔" referenceCount={0} settings={settings} onClose={vi.fn()} />)
+  try {
+    const button = buttonByText('AI 深度检查') as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+  } finally {
+    view.unmount()
+  }
+})
+
+test('AI 条目一键修改替换原文并清空旧 AI 结果', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  reviewMock.mockResolvedValue(JSON.stringify({
+    risk: 'block',
+    summary: '指向真实人物',
+    items: [
+      { label: '真实人物指向', severity: 'block', quote: 'Taylor Swift', reason: '平台禁止真实人物', suggestion: '改为虚构歌手', rewrite: '一位虚构歌手' },
+    ],
+  }))
+  const view = mount(
+    <PromptPolicyModal prompt="画一张 Taylor Swift 的演唱会照片" referenceCount={0} settings={testSettings} onClose={vi.fn()} />,
+  )
+  try {
+    await act(async () => { buttonByText('AI 深度检查')!.click() })
+    expect(document.body.textContent).toContain('一键修改')
+
+    await act(async () => { buttonByText('一键修改')!.click() })
+
+    const textarea = document.body.querySelector('textarea') as HTMLTextAreaElement
+    expect(textarea.value).toBe('画一张 一位虚构歌手 的演唱会照片')
+    expect(textarea.value).not.toContain('Taylor Swift')
+    // 文本变了，旧的 AI 结果已过期，被清掉
     expect(document.body.textContent).not.toContain('AI 深度检查结果')
   } finally {
     view.unmount()

@@ -1764,7 +1764,6 @@ export default function InputBar() {
           prompt={stripImageMentionMarkers(prompt)}
           referenceCount={inputImages.length}
           settings={settings}
-          profile={activeProfile}
           onClose={() => setShowPolicyCheck(false)}
         />
       )}
