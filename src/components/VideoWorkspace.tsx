@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { importShotProjectFolder, selectShotVideoImage, updateShotVideoDetails, useStore } from '../store'
-import { ImportIcon, RefreshIcon } from './icons'
-import type { TaskRecord } from '../types'
-import { ensureImageCached, getCachedImage } from '../lib/imageCache'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { importShotProjectFolder, removeMultipleTasks, selectShotVideoImage, updateShotVideoDetails, useStore } from '../store'
+import { ImportIcon, TrashIcon } from './icons'
+import VideoProjectTitle from './VideoProjectTitle'
+import type { TaskRecord, VideoShot } from '../types'
+import VideoShotCard, { type VideoShotLayout } from './VideoShotCard'
 import {
   readAccounts,
   availableAccounts,
+  quotaDate,
   readDoubaoSettings,
   remainingQuota,
   writeAccounts,
@@ -14,46 +16,33 @@ import {
   type DoubaoAccount,
   type VideoRatio,
 } from '../lib/doubaoAccounts'
-import { DEFAULT_VIDEO_BASE_URL, DEFAULT_VIDEO_MODEL, generateWithAccountRotation } from '../lib/doubaoVideo'
+import { DEFAULT_VIDEO_BASE_URL } from '../lib/doubaoVideo'
 import { buildVideoPrompt, parseShotTemplate } from '../lib/shotTemplate'
 import { groupTasksByProject } from '../lib/shotProjectExport'
 import { setWorkMode } from '../lib/workMode'
 import { runVideoBatch } from '../lib/videoBatch'
-import { bindVideoProjectFolder, pickVideoProjectFolder, prepareVideoSave, saveVideoBesideImage, supportsVideoFolderSave, type VideoSource } from '../lib/videoFileSave'
+import { bindVideoProjectFolder, hasShotVideo, pickVideoProjectFolder, supportsVideoFolderSave, type VideoSource } from '../lib/videoFileSave'
+import { useVideoTasks } from '../hooks/useVideoTasks'
+import { generateVideoTask } from '../lib/videoGeneration'
+import { updateVideoTask, useVideoTaskStore } from '../lib/videoTaskStore'
 
 const VIDEO_SHARED_PROMPT_KEY = 'gpt-image-video-shared-prompt'
-type VideoTask = TaskRecord & {
-  action?: string
-  audio?: string
-  imageId: string
-}
+const VideoCanvas = lazy(() => import('./VideoCanvas'))
 
 function newAccountId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-function FrameThumb({ imageId }: { imageId: string }) {
-  const [src, setSrc] = useState(() => getCachedImage(imageId) || '')
-
-  useEffect(() => {
-    let cancelled = false
-    setSrc(getCachedImage(imageId) || '')
-    void ensureImageCached(imageId).then((url) => {
-      if (!cancelled && url) setSrc(url)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [imageId])
-
-  return src
-    ? <img src={src} alt="" className="h-full w-full object-cover" />
-    : <span className="block h-full w-full bg-gray-100 dark:bg-white/[0.04]" />
-}
-
 export default function VideoWorkspace() {
   const showToast = useStore((s) => s.showToast)
+  const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const tasks = useStore((s) => s.tasks)
+  const [view, setView] = useState<'list' | 'canvas'>(() => {
+    try { return localStorage.getItem('gpt-image-video-view') === 'canvas' ? 'canvas' : 'list' } catch { return 'list' }
+  })
+  const [canvasProject, setCanvasProject] = useState(() => {
+    try { return localStorage.getItem('gpt-image-video-canvas-project') || '' } catch { return '' }
+  })
   const folderInput = useRef<HTMLInputElement>(null)
   const importLock = useRef(false)
   const [importProgress, setImportProgress] = useState<string | null>(null)
@@ -64,43 +53,62 @@ export default function VideoWorkspace() {
   const [draftName, setDraftName] = useState('')
   const [draftSession, setDraftSession] = useState('')
   const [draftQuota, setDraftQuota] = useState(5)
-  const [runningId, setRunningId] = useState<string | null>(null)
-  const [runningIds, setRunningIds] = useState<Set<string>>(new Set())
-  const generationLock = useRef(false)
-  const activeRuns = useRef(0)
-  const inFlightTasks = useRef(new Set<string>())
-  const taskAccountIds = useRef(new Map<string, string>())
-  const [retryableIds, setRetryableIds] = useState<Set<string>>(new Set())
-  const [uncertainIds, setUncertainIds] = useState<Set<string>>(new Set())
-  const [videos, setVideos] = useState<Record<string, string>>({})
-  const [videoDownloads, setVideoDownloads] = useState<Record<string, string>>({})
-  const [unsavedIds, setUnsavedIds] = useState<Set<string>>(new Set())
-  const [savingIds, setSavingIds] = useState<Set<string>>(new Set())
-  const [responses, setResponses] = useState<Record<string, string>>({})
-  const [requests, setRequests] = useState<Record<string, string>>({})
-  const [taskLinks, setTaskLinks] = useState<Record<string, string>>({})
-  const [taskWindows, setTaskWindows] = useState<Record<string, string>>({})
-  const [taskStatuses, setTaskStatuses] = useState<Record<string, string>>({})
-  const [excludedTaskIds, setExcludedTaskIds] = useState<Set<string>>(() => new Set())
+  const videoState = useVideoTasks()
+  const records = videoState.records
+  const runningIds = new Set(Object.values(records).filter((record) => record.tracking).map((record) => record.id))
+  const busy = runningIds.size > 0 || Object.values(records).some((record) => record.saveState === 'saving')
+  const [shotSelection, setShotSelection] = useState<Record<string, boolean>>({})
+  const [existingVideos, setExistingVideos] = useState<Record<string, boolean>>({})
+  const [checkingVideos, setCheckingVideos] = useState(true)
+  const [folderRevision, setFolderRevision] = useState(0)
+  const savedVideos = Object.values(records).filter((record) => record.saveState === 'saved').map((record) => `${record.id}:${record.savedPath}`).join('|')
+  const [projectSelectionMode, setProjectSelectionMode] = useState(false)
+  const [selectedProjectKeys, setSelectedProjectKeys] = useState<Set<string>>(() => new Set())
   const [templateOpen, setTemplateOpen] = useState(false)
   const [templateText, setTemplateText] = useState('')
   const [templateProject, setTemplateProject] = useState('')
   const templateFileInput = useRef<HTMLInputElement>(null)
   const parsedTemplate = useMemo(() => parseShotTemplate(templateText), [templateText])
 
+  useEffect(() => {
+    const refresh = () => setAccounts(readAccounts())
+    window.addEventListener('storage', refresh)
+    window.addEventListener('focus', refresh)
+    const timer = window.setInterval(refresh, 60000)
+    return () => {
+      window.removeEventListener('storage', refresh)
+      window.removeEventListener('focus', refresh)
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    let checking = false
+    const check = async () => {
+      if (checking) return
+      checking = true
+      setCheckingVideos(true)
+      const results = await Promise.all(tasks.filter((task) => task.outputImages.length > 0).map(async (task) => [task.id, await hasShotVideo(task)] as const))
+      if (cancelled) return
+      setExistingVideos((previous) => ({ ...previous, ...Object.fromEntries(results.flatMap(([id, exists]) => exists === undefined ? [] : [[id, exists] as const])) }))
+      setCheckingVideos(false)
+      checking = false
+    }
+    void check()
+    window.addEventListener('focus', check)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', check)
+    }
+  }, [tasks, folderRevision, savedVideos])
+
   function saveShotDetails(taskId: string, patch: Pick<TaskRecord, 'shotAction' | 'shotAudio' | 'shotDuration'>) {
     void updateShotVideoDetails([{ id: taskId, ...patch }]).catch(() => showToast('镜头设置保存失败，请重试', 'error'))
   }
 
   function setShotsSelected(taskIds: string[], selected: boolean) {
-    setExcludedTaskIds((previous) => {
-      const next = new Set(previous)
-      for (const id of taskIds) {
-        if (selected) next.delete(id)
-        else next.add(id)
-      }
-      return next
-    })
+    setShotSelection((previous) => ({ ...previous, ...Object.fromEntries(taskIds.map((id) => [id, selected])) }))
   }
 
   async function openTaskWindow(windowId: string) {
@@ -140,8 +148,41 @@ export default function VideoWorkspace() {
     return groupTasksByProject(frames)
   }, [tasks, sharedPrompt, ratio])
   const frameCount = groups.reduce((count, group) => count + group.tasks.length, 0)
+  const activeProject = groups.find((group) => (group.name || group.tasks[0].id) === canvasProject) || groups[0]
+  const visibleGroups = view === 'canvas' && !projectSelectionMode ? groups.filter((group) => group === activeProject) : groups
+  const selectedProjects = groups.filter((group) => selectedProjectKeys.has(group.name || group.tasks[0].id))
+  const selectionDisabled = busy || importProgress !== null || checkingVideos
   const targetGroup = groups.find((group) => (group.name || group.tasks[0].id) === templateProject)
   const templateMatches = targetGroup?.tasks.filter((task) => parsedTemplate.some((shot) => shot.index === task.shotIndex)) || []
+
+  function requestProjectDeletion(projects: typeof groups) {
+    if (!projects.length || Object.values(useVideoTaskStore.getState().records).some((record) => record.tracking || record.saveState === 'saving') || importLock.current) return
+    const names = new Set(projects.flatMap((group) => group.name ? [group.name] : []))
+    const visibleIds = new Set(projects.flatMap((group) => group.tasks.map((task) => task.id)))
+    const taskIds = tasks.filter((task) => visibleIds.has(task.id) || names.has(task.shotProjectName?.trim() || '')).map((task) => task.id)
+    const label = projects.length === 1 ? `项目「${projects[0].name || '未命名项目'}」` : `所选的 ${projects.length} 个项目`
+    setConfirmDialog({
+      title: projects.length === 1 ? '删除项目' : '批量删除项目',
+      message: `确定要删除${label}的全部 ${taskIds.length} 个任务吗？\n生图中的对应任务也会删除，未被其他任务引用的关联图片会被清理。已保存到原文件夹的图片和视频不受影响。`,
+      confirmText: projects.length === 1 ? '删除项目' : '删除所选项目',
+      awaitAction: true,
+      action: async () => {
+        if (Object.values(useVideoTaskStore.getState().records).some((record) => record.tracking || record.saveState === 'saving') || importLock.current) {
+          showToast('请等待视频生成或导入完成后再删除项目', 'error')
+          return false
+        }
+        try {
+          await removeMultipleTasks(taskIds)
+          setSelectedProjectKeys(new Set())
+          setProjectSelectionMode(false)
+        } catch (err) {
+          console.error('删除视频项目失败', err)
+          showToast('项目删除失败，请重试', 'error')
+          return false
+        }
+      },
+    })
+  }
 
   async function applyTemplate() {
     if (!templateMatches.length || !targetGroup) return
@@ -192,26 +233,10 @@ export default function VideoWorkspace() {
     try {
       const { files, sources } = await pickVideoProjectFolder()
       const count = await bindVideoProjectFolder(items, files, sources)
+      setFolderRevision((previous) => previous + 1)
       showToast(count ? `已关联 ${count} 张原图片，视频将保存到对应目录` : '所选文件夹中未找到与本项目相同的原图片', count ? 'success' : 'error')
     } catch (error) {
       if (error instanceof Error && error.name !== 'AbortError') showToast(error.message, 'error')
-    }
-  }
-
-  async function saveTaskVideo(task: VideoTask, url: string, source?: VideoSource) {
-    setSavingIds(prev => new Set(prev).add(task.id))
-    try {
-      source ||= await prepareVideoSave(task.id, task.imageId)
-      if (!source) throw new Error('请先关联原图片文件夹，再点击保存视频')
-      setTaskStatuses(prev => ({ ...prev, [task.id]: '视频已生成，正在保存到原图片文件夹…' }))
-      const savedPath = await saveVideoBesideImage(source, url, task.shotIndex)
-      setTaskStatuses(prev => ({ ...prev, [task.id]: `已保存：${savedPath}` }))
-      setUnsavedIds(prev => { const next = new Set(prev); next.delete(task.id); return next })
-    } catch (error) {
-      setUnsavedIds(prev => new Set(prev).add(task.id))
-      setTaskStatuses(prev => ({ ...prev, [task.id]: `视频已生成，未保存：${error instanceof Error ? error.message : '保存失败'}` }))
-    } finally {
-      setSavingIds(prev => { const next = new Set(prev); next.delete(task.id); return next })
     }
   }
 
@@ -239,7 +264,7 @@ export default function VideoWorkspace() {
         })
         const item = await response.json()
         if (!response.ok) throw new Error(item.message || '登录失败')
-        saveAccountList([...readAccounts().filter((account) => account.id !== item.id), { ...item, sessionId: '', quotaDate: existing?.quotaDate || '' }])
+        saveAccountList([...readAccounts().filter((account) => account.id !== item.id), { ...item, sessionId: '', quotaDate: item.quotaDate || existing?.quotaDate || quotaDate() }])
         setDraftName('')
         setDraftSession('')
         showToast('登录成功，已添加豆包账户', 'success')
@@ -250,8 +275,14 @@ export default function VideoWorkspace() {
   }
 
   async function handleGenerate(items: (typeof groups)[number]['tasks'], retry = false) {
-    if (generationLock.current && !retry) return
-    const selected = items.filter((item) => (retry || !excludedTaskIds.has(item.id)) && !inFlightTasks.current.has(item.id))
+    const state = useVideoTaskStore.getState()
+    if (state.storageError) {
+      showToast(state.storageError, 'error')
+      return
+    }
+    if (!retry && Object.values(state.records).some((record) => record.tracking || record.saveState === 'saving')) return
+    if (checkingVideos) return
+    const selected = items.filter((item) => (retry || (shotSelection[item.id] ?? !existingVideos[item.id])) && !state.records[item.id]?.tracking && state.records[item.id]?.saveState !== 'saving')
     if (!selected.length) return
     const ready = selected.filter((item) => item.action.trim() || item.audio.trim() || sharedPrompt.trim())
     if (!ready.length) {
@@ -262,111 +293,63 @@ export default function VideoWorkspace() {
       showToast('请先在左侧填写视频接口地址', 'error')
       return
     }
-    generationLock.current = true
-    activeRuns.current++
-    for (const item of ready) inFlightTasks.current.add(item.id)
-    const batchAccountId = (retry ? taskAccountIds.current.get(ready[0].id) : undefined) || availableAccounts(readAccounts())[0]?.id
-    if (batchAccountId) for (const item of ready) taskAccountIds.current.set(item.id, batchAccountId)
-    setTaskStatuses((prev) => ({ ...prev, ...Object.fromEntries(ready.map(item => [item.id, '已排队，等待账号发送锁'])) }))
+    const saved = readAccounts()
+    const available = availableAccounts(saved)
+    setAccounts(saved)
+    if (!available.length) {
+      showToast(saved.length ? '豆包账户今日额度已用完，请明日再试或添加其他账户' : '尚未添加豆包账户，请先添加并扫码登录', 'error')
+      return
+    }
+    if (ready.some((item) => state.records[item.id]?.uncertain || state.records[item.id]?.status === 'completed') &&
+        !window.confirm('所选镜头可能已被豆包受理或已有视频，请先检查原对话。确认重新提交？重新提交可能产生重复视频并消耗额度。')) return
+    const previousAccountId = retry ? state.records[ready[0].id]?.accountId : undefined
+    const batchAccountId = available.find((account) => account.id === previousAccountId)?.id || available[0].id
     try {
-      const { done, pending, failed, paused } = await runVideoBatch(ready, async item => {
-        setRunningId(item.id)
-        setRunningIds(prev => new Set(prev).add(item.id))
-        setRetryableIds(prev => { const next = new Set(prev); next.delete(item.id); return next })
-        setUncertainIds(prev => { const next = new Set(prev); next.delete(item.id); return next })
-        setTaskStatuses((prev) => ({ ...prev, [item.id]: '正在上传图片并发送消息…' }))
-        setVideos((prev) => ({ ...prev, [item.id]: '' }))
-        setUnsavedIds(prev => { const next = new Set(prev); next.delete(item.id); return next })
-        setResponses((prev) => ({ ...prev, [item.id]: '' }))
-        setRequests((prev) => ({ ...prev, [item.id]: item.videoPrompt }))
-        try {
-          const dataUrl = await ensureImageCached(item.imageId)
-          if (!dataUrl) throw new Error('找不到生成好的图片')
-          const source = await prepareVideoSave(item.id, item.imageId).catch(() => undefined)
-          const result = await generateWithAccountRotation({
-            accountId: batchAccountId,
-            baseUrl,
-            prompt: item.videoPrompt,
-            imageDataUrl: dataUrl,
-            duration: item.shotDuration,
-            ratio,
-            model: DEFAULT_VIDEO_MODEL,
-            onProgress: (progress) => {
-              const status = progress.status === 'queued' ? '尚未发送，等待该账号前序镜头开始生成'
-                : progress.status === 'confirming' ? '已识别参数确认，正在自动回复并等待豆包受理…'
-                : progress.status === 'failed' ? progress.responseText || '任务失败，请查看豆包窗口'
-                : progress.status === 'needs_attention' ? '等待你在豆包窗口确认，正在继续跟踪'
-                : progress.status === 'waiting' ? '消息已保存，等待豆包明确开始生成…'
-                : progress.status === 'generating' ? '豆包已受理，正在生成视频…'
-                : '正在上传图片并发送消息…'
-              setTaskStatuses((prev) => ({ ...prev, [item.id]: status }))
-              if (progress.responseText) setResponses((prev) => ({ ...prev, [item.id]: progress.responseText! }))
-              if (progress.taskUrl) setTaskLinks((prev) => ({ ...prev, [item.id]: progress.taskUrl! }))
-            },
-            onTaskWindow: (id) => {
-              setTaskWindows((prev) => ({ ...prev, [item.id]: id }))
-              setTaskLinks((prev) => ({ ...prev, [item.id]: '' }))
-            },
-          })
-          setVideos((prev) => ({ ...prev, [item.id]: result.url }))
-          setVideoDownloads(prev => ({ ...prev, [item.id]: result.downloadUrl || result.url }))
-          setResponses((prev) => ({ ...prev, [item.id]: result.responseText || '' }))
-          setRequests((prev) => ({ ...prev, [item.id]: result.requestText || item.videoPrompt }))
-          setTaskLinks((prev) => ({ ...prev, [item.id]: result.taskUrl || '' }))
-          setAccounts(readAccounts())
-          if (result.status !== 'completed') {
-            setRetryableIds(prev => new Set(prev).add(item.id))
-            setUncertainIds(prev => new Set(prev).add(item.id))
-            setTaskStatuses((prev) => ({ ...prev, [item.id]: result.status === 'needs_attention' ? '等待你在豆包窗口确认，本次跟踪已结束'
-              : result.status === 'generating' ? '豆包已开始生成，本次跟踪已超时，请查看原窗口结果'
-              : '尚未确认生成完成，请查看豆包窗口' }))
-            return result.status
-          }
-          await saveTaskVideo(item, result.downloadUrl || result.url, source)
-          return 'completed'
-        } catch (err) {
-          setRetryableIds(prev => new Set(prev).add(item.id))
-          // 接口明确拒绝时可直接重试；其他异常可能发生在受理之后。
-          if (!(err instanceof Error && 'code' in err && err.code === 'DOUBAO_SUBMIT_FAILED')) {
-            setUncertainIds(prev => new Set(prev).add(item.id))
-          }
-          setTaskStatuses((prev) => ({ ...prev, [item.id]: err instanceof Error ? err.message : '任务失败，请查看豆包窗口' }))
-          if (err instanceof Error && 'code' in err && err.code === 'DOUBAO_BATCH_PAUSED') return 'paused'
-          return 'failed'
-        } finally {
-          inFlightTasks.current.delete(item.id)
-          setRunningIds(prev => { const next = new Set(prev); next.delete(item.id); return next })
-          setAccounts(readAccounts())
-        }
-      }, remaining => {
-        setTaskStatuses(prev => ({ ...prev, ...Object.fromEntries(remaining.map(item => [item.id, '批次已暂停，前序镜头未完成；本镜头尚未发送'])) }))
+      const { done, pending, failed, paused } = await runVideoBatch(ready, (item) => generateVideoTask({
+        id: item.id, imageId: item.imageId, shotIndex: item.shotIndex, shotDuration: item.shotDuration,
+        prompt: item.videoPrompt, accountId: batchAccountId, baseUrl, ratio,
+      }), (remaining) => {
+        for (const item of remaining) updateVideoTask(item.id, { statusText: '批次已暂停，前序镜头未完成；本镜头尚未发送' })
       })
       showToast(`完成 ${done}，待查看 ${pending}，失败 ${failed}，暂停未发送 ${paused}`, pending || failed || paused ? 'error' : 'success')
     } finally {
-      activeRuns.current--
-      if (!activeRuns.current) {
-        generationLock.current = false
-        setRunningId(null)
-      }
+      setAccounts(readAccounts())
     }
   }
 
   function retryShot(task: (typeof groups)[number]['tasks'][number]) {
-    if (inFlightTasks.current.has(task.id)) return
-    if (uncertainIds.has(task.id) && !window.confirm('此镜头可能已被豆包受理，请先检查原对话。确认重新提交？重新提交可能产生重复视频并消耗额度。')) return
     void handleGenerate([task], true)
+  }
+
+  function renderShot(task: VideoShot, layout: VideoShotLayout) {
+    return <VideoShotCard
+      key={task.id}
+      task={task}
+      record={records[task.id]}
+      layout={layout}
+      running={runningIds.has(task.id)}
+      selected={shotSelection[task.id] ?? !existingVideos[task.id]}
+      hasVideo={existingVideos[task.id]}
+      disabled={selectionDisabled}
+      frameDisabled={busy}
+      onSelect={(selected) => setShotsSelected([task.id], selected)}
+      onEdit={(patch) => saveShotDetails(task.id, patch)}
+      onSelectFrame={selectFrame}
+      onRetry={() => retryShot(task)}
+      onOpen={openTaskWindow}
+    />
   }
 
   return (
     <main className="min-h-[calc(100vh-3.5rem)] bg-[#f7f8fa] pb-16 dark:bg-gray-950">
-      <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-5 px-4 pb-6 pt-10 sm:py-6 lg:grid-cols-[minmax(300px,350px)_minmax(0,1fr)] lg:gap-8 lg:px-8">
+      <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-5 px-4 pb-6 pt-10 sm:py-6 lg:grid-cols-[minmax(280px,340px)_minmax(0,1fr)] lg:gap-8 lg:px-8">
         <aside className="h-fit w-full rounded-2xl border border-gray-200/80 bg-white/95 p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] dark:border-white/[0.08] dark:bg-gray-900/90 dark:shadow-none lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-[11px] font-semibold tracking-[0.14em] text-blue-600 dark:text-blue-400">VIDEO STUDIO</p>
               <h2 className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">生成设置</h2>
             </div>
-            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">{accounts.length} 个账户</span>
+            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">{accounts.length} 个账户 · {availableAccounts(accounts).length} 个可用</span>
           </div>
 
           <section className="mt-6">
@@ -385,6 +368,7 @@ export default function VideoWorkspace() {
                         <div className="truncate text-sm font-medium text-gray-800 dark:text-gray-100">{account.name}</div>
                         <button type="button" onClick={() => addAccount(account)} className="text-xs text-blue-600">重新登录</button>
                         <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">今日剩余 {remaining}/{account.dailyQuota} 次</div>
+                        {remaining === 0 && <p className="mt-1 text-xs text-amber-600">今日额度已用完</p>}
                       </div>
                       <button
                         type="button"
@@ -469,7 +453,7 @@ export default function VideoWorkspace() {
               视频比例
               <select
                 value={ratio}
-                disabled={Boolean(runningId)}
+                disabled={busy}
                 onChange={(event) => {
                   const next = event.target.value as VideoRatio
                   setRatio(next)
@@ -506,9 +490,9 @@ export default function VideoWorkspace() {
             <div>
               <p className="text-[11px] font-semibold tracking-[0.14em] text-blue-600 dark:text-blue-400">SHOT TO VIDEO</p>
               <h2 className="mt-1 text-2xl font-semibold tracking-tight text-gray-900 dark:text-gray-100">把成图变成视频</h2>
-              <p className="mt-1.5 max-w-xl text-sm leading-6 text-gray-500 dark:text-gray-400">每个镜头沿用已生成的画面，再叠加模板动作和音频，按项目批量生成。</p>
+              <p className="mt-1.5 max-w-xl text-sm leading-6 text-gray-500 dark:text-gray-400">每个镜头沿用已生成的画面，再叠加模板动作和音频，按项目批量生成。长按项目名称可删除项目。</p>
             </div>
-            <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400 sm:justify-end">
               <input
                 ref={folderInput}
                 type="file"
@@ -528,7 +512,7 @@ export default function VideoWorkspace() {
                   setTemplateProject(groups[0] ? groups[0].name || groups[0].tasks[0].id : '')
                   setTemplateOpen((open) => !open)
                 }}
-                disabled={!groups.length || importProgress !== null || Boolean(runningId)}
+                disabled={!groups.length || importProgress !== null || busy}
                 aria-expanded={templateOpen}
                 className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200"
               >
@@ -538,17 +522,86 @@ export default function VideoWorkspace() {
               <button
                 type="button"
                 onClick={() => void pickImportFolder()}
-                disabled={importProgress !== null || Boolean(runningId)}
+                disabled={importProgress !== null || busy}
                 title="导入镜头文件夹"
                 className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200"
               >
                 <ImportIcon className="h-4 w-4 shrink-0" />
                 <span aria-live="polite">{importProgress || '导入文件夹'}</span>
               </button>
+              {!projectSelectionMode && (
+                <button
+                  type="button"
+                  onClick={() => setProjectSelectionMode(true)}
+                  disabled={!groups.length || selectionDisabled}
+                  className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-red-400 dark:hover:bg-red-500/10"
+                >
+                  <TrashIcon className="h-4 w-4 shrink-0" />
+                  批量删除
+                </button>
+              )}
               <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5 dark:border-white/[0.08] dark:bg-white/[0.04]">{groups.length} 个项目</span>
               <span className="rounded-full border border-gray-200 bg-white px-3 py-1.5 dark:border-white/[0.08] dark:bg-white/[0.04]">{frameCount} 个镜头</span>
             </div>
           </header>
+
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div role="group" aria-label="视频工作区视图" className="inline-flex rounded-xl border border-gray-200 bg-gray-100/70 p-1 dark:border-white/[0.08] dark:bg-white/[0.04]">
+              {(['list', 'canvas'] as const).map((mode) => (
+                <button key={mode} type="button" aria-pressed={view === mode} onClick={() => {
+                  setView(mode)
+                  try { localStorage.setItem('gpt-image-video-view', mode) } catch (err) { console.warn('视频视图偏好保存失败', err) }
+                }} className={`rounded-lg px-4 py-2 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 ${view === mode ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-700 dark:text-white' : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'}`}>
+                  {mode === 'list' ? '列表视图' : '无限画布'}
+                </button>
+              ))}
+            </div>
+            {view === 'canvas' && groups.length > 0 && !projectSelectionMode && (
+              <label className="flex min-w-0 items-center gap-2 text-xs text-gray-500 dark:text-gray-400">当前项目
+                <select aria-label="画布项目" value={activeProject.name || activeProject.tasks[0].id} onChange={(event) => {
+                  setCanvasProject(event.target.value)
+                  try { localStorage.setItem('gpt-image-video-canvas-project', event.target.value) } catch (err) { console.warn('画布项目偏好保存失败', err) }
+                }} className="min-w-0 max-w-60 rounded-lg border border-gray-200 bg-white px-3 py-2 text-gray-800 outline-none focus:border-blue-400 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-100">
+                  {groups.map((group) => <option key={group.name || group.tasks[0].id} value={group.name || group.tasks[0].id}>{group.name || `未命名项目 · 镜头 ${group.tasks[0].shotIndex || '—'}`}</option>)}
+                </select>
+              </label>
+            )}
+          </div>
+
+          {projectSelectionMode && (
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-white/[0.08] dark:bg-gray-900">
+              <div className="flex items-center gap-4 text-sm text-gray-600 dark:text-gray-300">
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    aria-label="全选项目用于删除"
+                    checked={groups.length > 0 && selectedProjects.length === groups.length}
+                    ref={(input) => { if (input) input.indeterminate = selectedProjects.length > 0 && selectedProjects.length < groups.length }}
+                    disabled={selectionDisabled}
+                    onChange={(event) => setSelectedProjectKeys(new Set(event.target.checked ? groups.map((group) => group.name || group.tasks[0].id) : []))}
+                    className="h-4 w-4 accent-red-600 disabled:cursor-not-allowed"
+                  />
+                  全选项目
+                </label>
+                <span aria-live="polite" className="text-xs text-gray-500">已选 {selectedProjects.length} 个项目</span>
+              </div>
+              <div className="flex items-center gap-4">
+                <button type="button" onClick={() => {
+                  setProjectSelectionMode(false)
+                  setSelectedProjectKeys(new Set())
+                }} className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">取消多选</button>
+                <button
+                  type="button"
+                  onClick={() => requestProjectDeletion(selectedProjects)}
+                  disabled={selectionDisabled || !selectedProjects.length}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <TrashIcon className="h-4 w-4" />
+                  删除所选项目 ({selectedProjects.length})
+                </button>
+              </div>
+            </div>
+          )}
 
           {templateOpen && (
             <section className="mb-6 border-y border-gray-200 py-4 dark:border-white/[0.08]">
@@ -573,21 +626,42 @@ export default function VideoWorkspace() {
                 <span aria-live="polite" className="text-xs text-gray-500">{parsedTemplate.length} 个片段 · 匹配 {templateMatches.length} 个镜头</span>
                 <div className="flex items-center gap-4">
                   <button type="button" onClick={() => setTemplateOpen(false)} className="text-xs text-gray-500">取消</button>
-                  <button type="button" onClick={() => void applyTemplate()} disabled={!templateMatches.length || Boolean(runningId)} className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white disabled:opacity-40 dark:bg-white dark:text-gray-900">应用到项目镜头</button>
+                  <button type="button" onClick={() => void applyTemplate()} disabled={!templateMatches.length || busy} className="rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white disabled:opacity-40 dark:bg-white dark:text-gray-900">应用到项目镜头</button>
                 </div>
               </div>
             </section>
           )}
 
-          {groups.length ? groups.map((group) => {
-            const selectedCount = group.tasks.filter((task) => !excludedTaskIds.has(task.id)).length
-            const selectionDisabled = Boolean(runningId) || importProgress !== null
+          {videoState.storageError && <p role="alert" className="mb-4 text-sm text-red-600">{videoState.storageError}</p>}
+          {groups.length ? visibleGroups.map((group) => {
+            const projectKey = group.name || group.tasks[0].id
+            const selectedCount = group.tasks.filter((task) => shotSelection[task.id] ?? !existingVideos[task.id]).length
             return (
-            <section key={group.name || group.tasks[0].id} className="mb-5 overflow-hidden rounded-2xl border border-gray-200/80 bg-white shadow-[0_8px_28px_rgba(15,23,42,0.04)] dark:border-white/[0.08] dark:bg-gray-900 dark:shadow-none">
+            <section key={projectKey} className="mb-5 overflow-hidden rounded-2xl border border-gray-200/80 bg-white shadow-[0_8px_28px_rgba(15,23,42,0.04)] dark:border-white/[0.08] dark:bg-gray-900 dark:shadow-none">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-5 py-4 dark:border-white/[0.07]">
-                <div className="min-w-0">
-                  <h3 className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{group.name || '未命名项目'}</h3>
-                  <p className="mt-0.5 text-xs text-gray-400" aria-live="polite">已选 {selectedCount} / {group.tasks.length} 个镜头</p>
+                <div className="flex min-w-0 items-start gap-3">
+                  {projectSelectionMode && (
+                    <input
+                      type="checkbox"
+                      aria-label={`选择项目「${group.name || '未命名项目'}」用于删除`}
+                      checked={selectedProjectKeys.has(projectKey)}
+                      disabled={selectionDisabled}
+                      onChange={(event) => {
+                        const checked = event.target.checked
+                        setSelectedProjectKeys((previous) => {
+                          const next = new Set(previous)
+                          if (checked) next.add(projectKey)
+                          else next.delete(projectKey)
+                          return next
+                        })
+                      }}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-red-600 disabled:cursor-not-allowed"
+                    />
+                  )}
+                  <div className="min-w-0">
+                    <VideoProjectTitle name={group.name} disabled={selectionDisabled} onDelete={() => requestProjectDeletion([group])} />
+                    <p className="mt-0.5 text-xs text-gray-400" aria-live="polite">已选 {selectedCount} / {group.tasks.length} 个镜头</p>
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-4">
                 <button type="button" onClick={() => void bindOriginalFolder(group.tasks)} disabled={selectionDisabled} className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 disabled:opacity-40"><ImportIcon className="h-4 w-4" />关联原文件夹</button>
@@ -609,58 +683,19 @@ export default function VideoWorkspace() {
                   disabled={selectionDisabled || selectedCount === 0}
                   className="shrink-0 rounded-xl bg-gray-900 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
                 >
-                  {runningId ? '生成中…' : `生成所选视频 (${selectedCount})`}
+                  {busy ? '生成中…' : `生成所选视频 (${selectedCount})`}
                 </button>
                 </div>
               </div>
-              <div className={`grid gap-px bg-gray-100 dark:bg-white/[0.07] ${group.tasks.length > 1 ? 'xl:grid-cols-2' : 'grid-cols-1'}`}>
-                {group.tasks.map((task) => {
-                  const single = group.tasks.length === 1
-                  const video = videos[task.id]
-                  if (single) {
-                    return (
-                      <article key={task.id} className={`grid gap-5 bg-white p-5 dark:bg-gray-900 ${video ? 'lg:grid-cols-[180px_minmax(0,1fr)_minmax(240px,420px)]' : 'sm:grid-cols-[180px_minmax(0,1fr)]'}`}>
-                        <ShotFrames task={task} disabled={Boolean(runningId)} onSelect={selectFrame} />
-                        <div className="min-w-0">
-                          <ShotDetails task={task} running={runningIds.has(task.id)} selected={!excludedTaskIds.has(task.id)} disabled={selectionDisabled} onSelect={(selected) => setShotsSelected([task.id], selected)} onEdit={(patch) => saveShotDetails(task.id, patch)} />
-                      {responses[task.id] && <details className="mt-2 rounded-xl bg-gray-50 p-2 dark:bg-white/[0.04]"><summary className="cursor-pointer text-xs font-medium">豆包回复</summary><p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">{responses[task.id]}</p></details>}
-                      {requests[task.id] && <details className="mt-2 rounded-xl bg-blue-50 p-2 dark:bg-blue-950/20"><summary className="cursor-pointer text-xs font-medium">发送给豆包的消息</summary><p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">{requests[task.id]}</p></details>}
-                      <p className="mt-2 break-words text-xs text-amber-600">{taskStatuses[task.id]}</p>
-                      <div className="mt-2 text-xs">
-                        {video && unsavedIds.has(task.id) && <button type="button" disabled={savingIds.has(task.id)} onClick={() => void saveTaskVideo(task, videoDownloads[task.id] || video)} className="mr-3 font-medium text-blue-600 disabled:opacity-40">{savingIds.has(task.id) ? '保存中…' : '保存视频'}</button>}
-                        {retryableIds.has(task.id) && <button type="button" disabled={runningIds.has(task.id)} onClick={() => retryShot(task)} title="重新提交此镜头" className="mr-3 inline-flex items-center gap-1 font-medium text-blue-600 hover:underline disabled:opacity-40"><RefreshIcon className="h-3.5 w-3.5" />重试</button>}
-                        {taskWindows[task.id] && <button type="button" onClick={() => void openTaskWindow(taskWindows[task.id])} className="mr-3 font-medium text-blue-600 hover:underline">查看本次豆包窗口 ↗</button>}
-                        {taskLinks[task.id]
-                          ? <a href={taskLinks[task.id]} target="_blank" rel="noreferrer" className="font-medium text-blue-600 hover:underline">打开豆包对话 ↗</a>
-                          : !taskWindows[task.id] && <span className="text-gray-500">{runningIds.has(task.id) ? '正在获取豆包对话链接…' : videos[task.id] ? '未获取到本次对话链接' : '生成后可查看豆包对话链接'}</span>}
-                      </div>
-                        </div>
-                        {video && <video src={video} controls className="w-full self-start rounded-xl bg-black" />}
-                      </article>
-                    )
-                  }
-                  return (
-                    <article key={task.id} className="flex flex-col gap-4 bg-white p-4 dark:bg-gray-900 sm:flex-row">
-                      <div className="w-full shrink-0 sm:w-44">
-                        <ShotFrames task={task} disabled={Boolean(runningId)} onSelect={selectFrame} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <ShotDetails task={task} running={runningIds.has(task.id)} selected={!excludedTaskIds.has(task.id)} disabled={selectionDisabled} onSelect={(selected) => setShotsSelected([task.id], selected)} onEdit={(patch) => saveShotDetails(task.id, patch)} />
-                        {videos[task.id] && <video src={videos[task.id]} controls className="mt-3 w-full rounded-xl bg-black" />}
-                        {responses[task.id] && <details className="mt-2 rounded-xl bg-gray-50 p-2 dark:bg-white/[0.04]"><summary className="cursor-pointer text-xs font-medium">豆包回复</summary><p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">{responses[task.id]}</p></details>}
-                        {requests[task.id] && <details className="mt-2 rounded-xl bg-blue-50 p-2 dark:bg-blue-950/20"><summary className="cursor-pointer text-xs font-medium">发送给豆包的消息</summary><p className="mt-1 whitespace-pre-wrap text-xs text-gray-500">{requests[task.id]}</p></details>}
-                        {taskStatuses[task.id] && <p className="mt-2 break-words text-xs text-amber-600">{taskStatuses[task.id]}</p>}
-                        <div className="mt-2 flex flex-wrap gap-3 text-xs">
-                          {video && unsavedIds.has(task.id) && <button type="button" disabled={savingIds.has(task.id)} onClick={() => void saveTaskVideo(task, videoDownloads[task.id] || video)} className="font-medium text-blue-600 disabled:opacity-40">{savingIds.has(task.id) ? '保存中…' : '保存视频'}</button>}
-                          {retryableIds.has(task.id) && <button type="button" disabled={runningIds.has(task.id)} onClick={() => retryShot(task)} title="重新提交此镜头" className="inline-flex items-center gap-1 font-medium text-blue-600 hover:underline disabled:opacity-40"><RefreshIcon className="h-3.5 w-3.5" />重试</button>}
-                          {taskWindows[task.id] && <button type="button" onClick={() => void openTaskWindow(taskWindows[task.id])} className="font-medium text-blue-600 hover:underline">查看本次豆包窗口 ↗</button>}
-                          {taskLinks[task.id] && <a href={taskLinks[task.id]} target="_blank" rel="noreferrer" className="font-medium text-blue-600 hover:underline">打开豆包对话 ↗</a>}
-                        </div>
-                      </div>
-                    </article>
-                  )
-                })}
+              {view === 'canvas' && !projectSelectionMode ? (
+                <Suspense fallback={<p role="status" className="p-8 text-center text-sm text-gray-500">正在打开画布…</p>}>
+                  <VideoCanvas key={projectKey} projectKey={projectKey} tasks={group.tasks} renderStage={(task, stage) => renderShot(task, stage)} />
+                </Suspense>
+              ) : (
+              <div className={`grid gap-px bg-gray-100 dark:bg-white/[0.07] ${group.tasks.length > 1 ? 'min-[1900px]:grid-cols-2' : 'grid-cols-1'}`}>
+                {group.tasks.map((task) => renderShot(task, group.tasks.length === 1 ? 'single' : 'list'))}
               </div>
+              )}
             </section>
             )
           }) : (
@@ -680,79 +715,5 @@ export default function VideoWorkspace() {
         </section>
       </div>
     </main>
-  )
-}
-
-function ShotFrames({ task, disabled, onSelect }: {
-  task: VideoTask
-  disabled: boolean
-  onSelect: (taskId: string, imageId: string) => void
-}) {
-  return (
-    <div className="min-w-0">
-      <div className="aspect-video w-full overflow-hidden rounded-xl bg-gray-100 dark:bg-white/[0.05]">
-        <FrameThumb imageId={task.imageId} />
-      </div>
-      {task.outputImages.length > 1 && (
-        <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label={`镜头${task.shotIndex || ''}首帧`}>
-          {task.outputImages.map((imageId, index) => (
-            <button
-              key={imageId}
-              type="button"
-              disabled={disabled}
-              aria-label={`选择第${index + 1}张图片作为首帧`}
-              aria-pressed={task.imageId === imageId}
-              title={`首帧 ${index + 1}`}
-              onClick={() => onSelect(task.id, imageId)}
-              className={`h-10 w-14 overflow-hidden rounded-md border-2 disabled:cursor-not-allowed ${task.imageId === imageId ? 'border-blue-500' : 'border-transparent hover:border-gray-300'}`}
-            >
-              <FrameThumb imageId={imageId} />
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ShotDetails({ task, running, selected, disabled, onSelect, onEdit }: {
-  task: VideoTask
-  running: boolean
-  selected: boolean
-  disabled: boolean
-  onSelect: (selected: boolean) => void
-  onEdit: (patch: Pick<TaskRecord, 'shotAction' | 'shotAudio' | 'shotDuration'>) => void
-}) {
-  const [durationDraft, setDurationDraft] = useState(String(task.shotDuration ?? 10))
-  useEffect(() => setDurationDraft(String(task.shotDuration ?? 10)), [task.shotDuration])
-  const inputClass = 'mt-1 w-full resize-y rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs leading-5 text-gray-700 outline-none focus:border-blue-400 disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200'
-  return (
-    <div className="min-w-0 text-xs leading-5 text-gray-600 dark:text-gray-300">
-      <div className="mb-1.5 flex flex-wrap items-center gap-2">
-        <label className="flex cursor-pointer items-center gap-2">
-        <input
-          type="checkbox"
-          aria-label={`选择镜头 ${task.shotIndex || '—'}生成视频`}
-          checked={selected}
-          disabled={disabled}
-          onChange={(event) => onSelect(event.target.checked)}
-          className="h-4 w-4 shrink-0 accent-blue-600 disabled:cursor-not-allowed"
-        />
-        <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-700 dark:bg-white/[0.08] dark:text-gray-200">镜头 {task.shotIndex || '—'}</span>
-        </label>
-        {running && <span className="text-blue-500">生成中</span>}
-      </div>
-      <label className="block">动作<textarea aria-label={`镜头 ${task.shotIndex || '—'}动作`} rows={3} value={task.action || ''} disabled={disabled} onChange={(event) => onEdit({ shotAction: event.target.value })} className={inputClass} /></label>
-      <label className="mt-2 block">音频<textarea aria-label={`镜头 ${task.shotIndex || '—'}音频`} rows={3} value={task.audio || ''} disabled={disabled} onChange={(event) => onEdit({ shotAudio: event.target.value })} className={inputClass} /></label>
-      <label className="mt-2 flex flex-wrap items-center gap-2">时长
-        <input aria-label={`镜头 ${task.shotIndex || '—'}时长（秒）`} type="number" min={0.1} step={0.1} value={durationDraft} disabled={disabled} onChange={(event) => {
-          setDurationDraft(event.target.value)
-        }} onBlur={() => {
-          const value = Number(durationDraft)
-          if (Number.isFinite(value) && value > 0) onEdit({ shotDuration: value })
-          else setDurationDraft(String(task.shotDuration ?? 10))
-        }} className="w-20 rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 outline-none focus:border-blue-400 disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.04]" />秒
-      </label>
-    </div>
   )
 }
