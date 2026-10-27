@@ -89,7 +89,9 @@ export default function AgentSettingsTab({
               </div>
             </div>
             <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-              用于对话和调用工具，仅支持 Responses API 配置。
+              {draft.textApiEnabled && draft.agentApiConfigMode === 'hybrid'
+                ? '已启用独立生文配置，混合模式的文本模型改用「生文配置」里的接口。'
+                : '用于对话和调用工具，仅支持 Responses API 配置。'}
             </div>
           </div>
 

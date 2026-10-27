@@ -15,6 +15,7 @@ import {
   importCustomProviderDefinitionFromJson,
   importCustomProviderSettingsFromJson,
   getDefaultApiProfileId,
+  getTextApiProfile,
   mergePresetImportedSettings as mergeDefaultImportedSettings,
   mergeImportedSettings,
   normalizeApiProfile,
@@ -1689,6 +1690,67 @@ describe('custom providers', () => {
     expect(restoredProfile.baseUrl).toBe('https://api.compat.example.com/v1')
     expect(restoredProfile.model).toBe('custom-openai-model')
     expect(restoredProfile.apiProxy).toBe(false)
+  })
+})
+
+describe('生文配置', () => {
+  const imageProfile = normalizeApiProfile({
+    id: 'image-profile',
+    name: '生图',
+    baseUrl: 'https://image.example.com/v1',
+    apiKey: 'sk-image',
+    model: 'gpt-image-2',
+    apiMode: 'images',
+    timeout: 60,
+  })
+
+  it('未启用时沿用生图配置', () => {
+    const profile = getTextApiProfile({ profiles: [imageProfile], activeProfileId: imageProfile.id })
+    expect(profile.baseUrl).toBe('https://image.example.com/v1')
+    expect(profile.apiKey).toBe('sk-image')
+    expect(profile.model).toBe('gpt-image-2')
+    expect(profile.timeout).toBe(60)
+  })
+
+  it('启用后逐项覆盖，留空的字段回落到生图配置', () => {
+    const profile = getTextApiProfile({
+      profiles: [imageProfile],
+      activeProfileId: imageProfile.id,
+      textApiEnabled: true,
+      textApiBaseUrl: 'https://text.example.com/v1',
+      textApiKey: '',
+      textApiModel: 'gpt-5',
+      textApiTimeout: 30,
+    })
+    expect(profile.baseUrl).toBe('https://text.example.com/v1')
+    expect(profile.apiKey).toBe('sk-image')
+    expect(profile.model).toBe('gpt-5')
+    expect(profile.timeout).toBe(30)
+    // 生文固定走 Responses 接口，且不会开启图片流式返回
+    expect(profile.apiMode).toBe('responses')
+    expect(profile.streamImages).toBe(false)
+  })
+
+  it('启用但全部留空时仍然可用（与生图配置等价）', () => {
+    const profile = getTextApiProfile({
+      profiles: [imageProfile],
+      activeProfileId: imageProfile.id,
+      textApiEnabled: true,
+      textApiTimeout: 0,
+    })
+    expect(profile.baseUrl).toBe(imageProfile.baseUrl)
+    expect(profile.model).toBe(imageProfile.model)
+    expect(profile.timeout).toBe(60)
+  })
+
+  it('默认关闭且不带任何地址与模型', () => {
+    expect(DEFAULT_SETTINGS.textApiEnabled).toBe(false)
+    expect(normalizeSettings({}).textApiBaseUrl).toBe('')
+    expect(normalizeSettings({}).textApiKey).toBe('')
+    expect(normalizeSettings({}).textApiModel).toBe('')
+    expect(normalizeSettings({}).textApiTimeout).toBe(0)
+    expect(normalizeSettings({ textApiTimeout: -5 }).textApiTimeout).toBe(0)
+    expect(normalizeSettings({ textApiTimeout: 42.7 }).textApiTimeout).toBe(42)
   })
 })
 

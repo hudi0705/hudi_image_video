@@ -753,20 +753,52 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     agentApiConfigMode,
     agentTextProfileId,
     agentImageProfileId,
+    textApiEnabled: record.textApiEnabled === true,
+    textApiBaseUrl: typeof record.textApiBaseUrl === 'string' ? record.textApiBaseUrl : '',
+    textApiKey: typeof record.textApiKey === 'string' ? record.textApiKey : '',
+    textApiModel: typeof record.textApiModel === 'string' ? record.textApiModel : '',
+    textApiTimeout: typeof record.textApiTimeout === 'number' && Number.isFinite(record.textApiTimeout) && record.textApiTimeout > 0
+      ? Math.trunc(record.textApiTimeout)
+      : 0,
     profiles,
     activeProfileId,
   }
 }
 
+/**
+ * 生文配置：所有文本能力（提示词 AI 检查、选题、Agent 文本模型）共用的接口。
+ * 未启用独立配置或字段留空时，逐项回落到生图配置。
+ */
+export function getTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
+  const normalized = normalizeSettings(settings)
+  const active = getActiveApiProfile(normalized)
+  if (!normalized.textApiEnabled) return active
+  return {
+    ...active,
+    id: 'text-api',
+    name: '生文配置',
+    baseUrl: normalized.textApiBaseUrl.trim() || active.baseUrl,
+    apiKey: normalized.textApiKey.trim() || active.apiKey,
+    model: normalized.textApiModel.trim() || active.model,
+    timeout: normalized.textApiTimeout > 0 ? normalized.textApiTimeout : active.timeout,
+    apiMode: 'responses',
+    streamImages: false,
+  }
+}
+
 export function getAgentTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode === 'off') return getActiveApiProfile(normalized)
+  if (normalized.agentApiConfigMode === 'off') return getTextApiProfile(normalized)
+  // 混合模式下文本与图像本来就分离，开启生文配置后文本侧直接跟随它
+  if (normalized.agentApiConfigMode === 'hybrid' && normalized.textApiEnabled) return getTextApiProfile(normalized)
   const profile = normalized.profiles.find((item) => item.id === normalized.agentTextProfileId)
   return profile ? resolveApiProfileModel(profile) : null
 }
 
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
+  // Agent 关闭独立配置时整体跟随首页配置，只有文本模型可以用生文配置
+  if (normalized.agentApiConfigMode === 'off') return getActiveApiProfile(normalized)
   if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
   const profile = normalized.profiles.find((item) => item.id === normalized.agentImageProfileId)
   return profile ? resolveApiProfileModel(profile) : null
