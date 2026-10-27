@@ -1,3 +1,5 @@
+import type { TaskRecord } from '../types'
+
 export interface ParsedShot {
   index: number
   title: string
@@ -149,10 +151,31 @@ export function parseShotTemplate(input: string): ParsedShot[] {
     }))
 }
 
+const STYLE_IMAGE_PROMPT = '参考所附图片的画风、材质、色彩和光影来生成新画面。这些图片只作为样式参考，不要照搬其中的具体主体、构图和文字。不要在画面里写出提示词。'
+
+export function getShotImagePromptParts(task: Pick<TaskRecord, 'prompt' | 'shotSharedPrompt' | 'shotPrompt'>, sharedPrompt = '', shotPrompt = '') {
+  if (typeof task.shotSharedPrompt === 'string' && typeof task.shotPrompt === 'string') {
+    return { sharedPrompt: task.shotSharedPrompt, shotPrompt: task.shotPrompt, legacy: false }
+  }
+  const prompt = task.prompt.startsWith(STYLE_IMAGE_PROMPT)
+    ? task.prompt.slice(STYLE_IMAGE_PROMPT.length).trim()
+    : task.prompt
+  const shot = shotPrompt.trim()
+  if (shot && (prompt === shot || prompt.endsWith(`\n${shot}`))) {
+    return { sharedPrompt: prompt.slice(0, prompt.length - shot.length).trim(), shotPrompt: shot, legacy: false }
+  }
+  const shared = sharedPrompt.trim()
+  if (shared && prompt.startsWith(`${shared}\n`)) {
+    return { sharedPrompt: shared, shotPrompt: prompt.slice(shared.length + 1), legacy: false }
+  }
+  // 旧任务只存了合并后的提示词，无法确定边界时保留全文，避免误拆或丢失内容。
+  return { sharedPrompt: '', shotPrompt: prompt, legacy: true }
+}
+
 export function buildShotImagePrompt(shot: string, hasStyleImages: boolean, sharedPrompt = '') {
   const parts = []
   if (hasStyleImages) {
-    parts.push('参考所附图片的画风、材质、色彩和光影来生成新画面。这些图片只作为样式参考，不要照搬其中的具体主体、构图和文字。不要在画面里写出提示词。')
+    parts.push(STYLE_IMAGE_PROMPT)
   }
   const shared = sharedPrompt.trim()
   if (shared) parts.push(shared)

@@ -1,6 +1,7 @@
 export interface ShotFolder {
   index: number
   files: File[]
+  hasVideo?: boolean
 }
 
 const IMAGE_MIMES: Record<string, string> = {
@@ -14,6 +15,7 @@ export function getShotImageMime(file: File) {
 
 export function parseShotProjectFolder(files: File[]) {
   const shots = new Map<number, ShotFolder>()
+  const videoShots = new Set<number>()
   let projectName = ''
   let ignoredImages = 0
   for (const file of files) {
@@ -21,11 +23,17 @@ export function parseShotProjectFolder(files: File[]) {
     if (parts.length < 2) continue
     projectName ||= parts[0]
     if (parts.some((part) => part.startsWith('.') || part === '__MACOSX')) continue
-    if (!getShotImageMime(file)) continue
+    const image = getShotImageMime(file)
+    const video = /\.mp4$/i.test(file.name)
+    if (!image && !video) continue
     const match = parts.length >= 3 ? /^镜头\s*[-_]?\s*(\d+)$/u.exec(parts[1]) : null
     const index = Number(match?.[1])
     if (!Number.isSafeInteger(index) || index < 1) {
-      ignoredImages += 1
+      if (image) ignoredImages += 1
+      continue
+    }
+    if (video) {
+      videoShots.add(index)
       continue
     }
     const shot = shots.get(index) || { index, files: [] }
@@ -34,6 +42,7 @@ export function parseShotProjectFolder(files: File[]) {
   }
   const sortedShots = [...shots.values()].sort((a, b) => a.index - b.index)
   for (const shot of sortedShots) {
+    shot.hasVideo = videoShots.has(shot.index)
     shot.files.sort((a, b) => a.webkitRelativePath.localeCompare(b.webkitRelativePath, 'zh-CN', { numeric: true }))
   }
   return { projectName, shots: sortedShots, ignoredImages }

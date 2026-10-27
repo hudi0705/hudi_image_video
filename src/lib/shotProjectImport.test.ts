@@ -27,7 +27,17 @@ describe('parseShotProjectFolder', () => {
     ])
     expect(result.shots.map((shot) => shot.index)).toEqual([1])
     expect(result.shots[0].files).toHaveLength(1)
+    expect(result.shots[0].hasVideo).toBe(true)
     expect(result.ignoredImages).toBe(4)
+  })
+
+  it('matches MP4 to its own shot including nested folders and ignores hidden videos', () => {
+    const result = parseShotProjectFolder([
+      file('项目/镜头1/frame.png'), file('项目/镜头1/视频/成片.MP4'),
+      file('项目/镜头2/frame.png'), file('项目/镜头2/.备份/video.mp4'),
+      file('项目/镜头3/frame.png'), file('项目/镜头4/只有视频.mp4'),
+    ])
+    expect(result.shots.map((shot) => [shot.index, shot.hasVideo])).toEqual([[1, true], [2, false], [3, false]])
   })
 
   it('requires a project folder and supports images with missing browser MIME types', () => {

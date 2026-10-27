@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildShotImagePrompt, buildVideoPrompt, parseShotTemplate } from './shotTemplate'
+import { buildShotImagePrompt, buildVideoPrompt, getShotImagePromptParts, parseShotTemplate } from './shotTemplate'
 
 describe('parseShotTemplate', () => {
   it('parses one shot and its sound', () => {
@@ -119,5 +119,31 @@ describe('buildShotImagePrompt', () => {
     expect(sharedAt).toBeGreaterThan(-1)
     expect(shotAt).toBeGreaterThan(sharedAt)
     expect(buildShotImagePrompt('地图上的四座城市', false, '   ')).toBe('地图上的四座城市')
+  })
+})
+
+describe('getShotImagePromptParts', () => {
+  it('uses the saved fields even when the template has since changed', () => {
+    expect(getShotImagePromptParts({ prompt: '完整提示词', shotSharedPrompt: '', shotPrompt: '原镜头' }, '新通用提示词', '新镜头')).toEqual({
+      sharedPrompt: '', shotPrompt: '原镜头', legacy: false,
+    })
+  })
+
+  it('recovers the original shared prompt from a matching legacy shot', () => {
+    expect(getShotImagePromptParts({ prompt: buildShotImagePrompt('工作台\n钥匙特写', true, '原通用提示词') }, '已修改的通用提示词', '工作台\n钥匙特写')).toEqual({
+      sharedPrompt: '原通用提示词', shotPrompt: '工作台\n钥匙特写', legacy: false,
+    })
+  })
+
+  it('uses an exact shared prefix when the original template is unavailable', () => {
+    expect(getShotImagePromptParts({ prompt: buildShotImagePrompt('工作台', true, '油画风格') }, '油画风格')).toEqual({
+      sharedPrompt: '油画风格', shotPrompt: '工作台', legacy: false,
+    })
+  })
+
+  it('keeps all legacy content when neither boundary can be identified', () => {
+    expect(getShotImagePromptParts({ prompt: buildShotImagePrompt('原通用提示词\n原镜头', true) }, '新通用提示词', '新镜头')).toEqual({
+      sharedPrompt: '', shotPrompt: '原通用提示词\n原镜头', legacy: true,
+    })
   })
 })
