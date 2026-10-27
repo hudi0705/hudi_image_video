@@ -6,8 +6,11 @@ import { chromium } from 'playwright'
 import { submitVideoMessage, currentReplies, markRepliesBeforePrompt, videoReplyStatus, activateReplyVideo } from './doubao-submit.mjs'
 import { randomUUID } from 'node:crypto'
 import { TaskWindows } from './doubao-task-windows.mjs'
+import { TaskStore } from './doubao-task-store.mjs'
+import { readTaskConversation } from './doubao-task-recovery.mjs'
 import { taskUrlFromCandidates } from './doubao-task-url.mjs'
 import { accountPaths, loadAccountStore, readSession, saveAccount } from './doubao-account-store.mjs'
+import { refreshAccountQuota } from './doubao-account-quota.mjs'
 import { interruptedTaskResult, isWindowInterruption } from './doubao-window-interruption.mjs'
 import { TaskBinding } from './doubao-task-binding.mjs'
 import { verifySavedConversation } from './doubao-saved-conversation.mjs'
@@ -21,6 +24,7 @@ import { VideoConfirmation, VIDEO_CONFIRMATION_TEXT } from './doubao-video-confi
 import { AccountBrowserPool } from './doubao-browser-pool.mjs'
 import { hasGenerationStarted } from './doubao-generation-start.mjs'
 import { downloadTaskVideo } from './doubao-video-download.mjs'
+import { videoReplyFailure } from '../src/lib/doubaoGenerationFailure.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDir = path.join(root, 'data', 'doubao-accounts')
@@ -34,10 +38,60 @@ await fs.mkdir(dataDir, { recursive: true })
 
 const accounts = await loadAccountStore(dataDir)
 let loggingIn = false
-const taskWindows = new TaskWindows()
+const taskStore = new TaskStore(path.join(root, 'data', 'doubao-tasks'))
+const taskWindows = new TaskWindows(taskStore)
 const accountQueue = new AccountQueue()
 const browserPool = new AccountBrowserPool(chromium, readSession)
 const accountWrites = new Map()
+const recoveryReads = new Set()
+
+await taskWindows.load((windowId, record) => ({
+  reopen: async () => {
+    const item = accounts.get(record.accountId)
+    if (!item) throw new Error('本次任务的原账号不存在，请恢复原账号登录')
+    if (!record.taskUrl) throw new Error('任务已保留，但尚未取得原对话地址，请先检查豆包历史记录；未重新提交')
+    const context = await browserPool.context(item)
+    const page = await context.newPage()
+    try {
+      await page.goto(record.taskUrl, { waitUntil: 'domcontentloaded' })
+      return page
+    } catch (err) {
+      await page.close().catch(() => {})
+      throw err
+    }
+  },
+  ensureTarget: (page) => refreshRestoredTask(windowId, page),
+}))
+
+async function refreshRestoredTask(windowId, page) {
+  if (recoveryReads.has(windowId)) return
+  recoveryReads.add(windowId)
+  try {
+    const record = taskWindows.status(windowId)
+    const result = await readTaskConversation(page, record, url)
+    if (result.status === 'completed') {
+      try {
+        await taskStore.saveVideo(windowId, await downloadTaskVideo(page, result.url))
+      } catch (err) {
+        console.warn('[豆包] 恢复视频缓存失败，保留原地址', err)
+      }
+      const item = accounts.get(record.accountId)
+      if (item && !record.quotaCounted) {
+        await writeAccountState(item, async () => {
+          refreshAccountQuota(item)
+          item.usedToday++
+          await saveAccount(dataDir, item)
+        })
+      }
+      taskWindows.update(windowId, { ...result, quotaCounted: true })
+    } else if (record.status !== 'completed') {
+      taskWindows.update(windowId, result)
+    }
+    await taskWindows.flush(windowId)
+  } finally {
+    recoveryReads.delete(windowId)
+  }
+}
 
 function writeAccountState(item, operation) {
   const previous = accountWrites.get(item.id) || Promise.resolve()
@@ -137,6 +191,7 @@ async function generate(item, prompt, imageDataUrl, windowId, generationStarted)
     diagnostics.event('view_task_window', { currentUrl: taskUrlFromCandidates([target.url()], url), boundUrl: binding.recoveryUrl, active })
     // 上传/发送阶段只聚焦原窗口，不能导航或等待尚未出现的消息。
     if (messageVisible || target !== originalPage) await ensureTarget(target)
+    if (!active && !taskWindows.status(windowId)?.tracking) await refreshRestoredTask(windowId, target)
   })
   retained = true
   await page.goto(url, { waitUntil: 'domcontentloaded' })
@@ -208,6 +263,18 @@ async function generate(item, prompt, imageDataUrl, windowId, generationStarted)
         responseText: '发送页面显示了消息，但 60 秒内未收到豆包回复，尚未确认豆包受理。请保留原窗口，检查是否有发送失败、上传失败、登录或验证提示。诊断已保存到 data/doubao-diagnostics；不要直接重复提交。',
       }
     }
+    if (responseText !== previousReply) { previousReply = responseText; stableSince = Date.now() }
+    const latestReply = await replies.last().innerText().catch(() => '')
+    const failureReason = videoReplyFailure(latestReply)
+    // 当前窗口已用原提示词定位，明确拒绝无需再等待视频或独立对话校验。
+    if (!videoCount && failureReason) {
+      if (Date.now() - stableSince <= 5000) {
+        await delay(1000)
+        continue
+      }
+      diagnostics.event('generation_refused', { failureReason })
+      return { url: '', taskUrl: conversationUrl, requestText: prompt, responseText, status: 'failed', failureReason }
+    }
     if (binding.url && !savedConversationVerified && (responseText || videoCount > 0)) {
       diagnostics.stage('verifying_saved_conversation')
       const verified = await completion.race(verifySavedConversation(page.context(), binding.url, replyAnchor))
@@ -234,7 +301,6 @@ async function generate(item, prompt, imageDataUrl, windowId, generationStarted)
       await writeAccountState(item, () => page.context().storageState({ path: item.storageState, indexedDB: true }))
       await page.bringToFront()
     }
-    if (responseText !== previousReply) { previousReply = responseText; stableSince = Date.now() }
     if (savedConversationVerified) {
       const confirmed = !videoCount && await confirmation.reply(page, replies, {
         stable: Date.now() - stableSince > 5000,
@@ -254,6 +320,7 @@ async function generate(item, prompt, imageDataUrl, windowId, generationStarted)
       })
       if (confirmed) {
         replyAnchor = VIDEO_CONFIRMATION_TEXT
+        taskWindows.update(windowId, { replyAnchor })
         savedConversationVerified = false
         previousReply = ''
         stableSince = Date.now()
@@ -261,7 +328,6 @@ async function generate(item, prompt, imageDataUrl, windowId, generationStarted)
         diagnostics.stage('waiting_for_confirmation_reply')
         continue
       }
-      const latestReply = await replies.last().innerText().catch(() => '')
       replyStatus = videoReplyStatus(latestReply, Date.now() - stableSince > 5000)
       if (hasGenerationStarted(latestReply, { verified: savedConversationVerified, stable: Date.now() - stableSince > 5000, videoCount })) {
         generationAccepted = true
@@ -312,23 +378,37 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') return json(res, 204, {})
     if (req.method === 'GET' && req.url.startsWith('/task-window/video?')) {
       const windowId = new URL(req.url, `http://127.0.0.1:${port}`).searchParams.get('windowId')
-      const task = taskWindows.status(windowId)
+      let task = taskWindows.status(windowId)
       if (task?.status !== 'completed' || !task.url) return json(res, 404, { message: '本次任务尚未生成视频' })
-      const bytes = await downloadTaskVideo(taskWindows.current(windowId), task.url)
+      let bytes = await taskStore.readVideo(windowId)
+      if (!bytes) {
+        if (!taskWindows.current(windowId)) await taskWindows.open(windowId)
+        if (!taskWindows.status(windowId).tracking) await refreshRestoredTask(windowId, taskWindows.current(windowId))
+        task = taskWindows.status(windowId)
+        bytes = await downloadTaskVideo(taskWindows.current(windowId), task.url)
+        await taskStore.saveVideo(windowId, bytes)
+      }
       res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': bytes.length, 'Access-Control-Allow-Origin': '*' })
       return res.end(bytes)
     }
     if (req.method === 'GET' && req.url.startsWith('/task-window/status?')) {
       const windowId = new URL(req.url, `http://127.0.0.1:${port}`).searchParams.get('windowId')
+      const page = taskWindows.current(windowId)
+      const task = taskWindows.status(windowId)
+      // 只读取已打开的原对话；查询不能新建生成请求或打断活动窗口。
+      if (page && task && !task.tracking && task.status !== 'completed') await refreshRestoredTask(windowId, page)
       const status = taskWindows.status(windowId)
-      return json(res, status ? 200 : 404, status || { message: '任务尚未登记' })
+      return json(res, status ? 200 : 404, status ? { ...status, downloadUrl: status.url ? `http://127.0.0.1:${port}/task-window/video?windowId=${encodeURIComponent(windowId)}` : '' } : { message: '任务尚未登记' })
     }
     if (req.method === 'POST' && req.url === '/task-window/open') {
       const input = await body(req)
       const result = await taskWindows.open(String(input.windowId), 5000)
       return json(res, 200, { ok: true, message: result.reopened ? '已用原账号打开本次消息绑定的对话，未重新提交生成。' : '' })
     }
-    if (req.method === 'GET' && req.url === '/accounts') return json(res, 200, [...accounts.values()].map(({ storageState, ...item }) => item))
+    if (req.method === 'GET' && req.url === '/accounts') return json(res, 200, [...accounts.values()].map((account) => {
+      const { storageState, ...item } = refreshAccountQuota(account)
+      return item
+    }))
     if (req.method === 'POST' && req.url === '/accounts') {
       if (loggingIn) return json(res, 409, { message: '请先完成当前账户登录并在终端按回车' })
       loggingIn = true
@@ -336,7 +416,10 @@ const server = http.createServer(async (req, res) => {
       const input = await body(req)
       const id = String(input.id || `doubao-${Date.now().toString(36)}`)
       if (accountQueue.states.get(id)?.active) return json(res, 409, { message: '该账户正在生成视频，请任务结束后重新登录' })
-      const item = { id, name: String(input.name || id), storageState: accountPaths(dataDir, id).storageState, dailyQuota: Number(input.dailyQuota) || 5, usedToday: accounts.get(id)?.usedToday || 0 }
+      const item = refreshAccountQuota({
+        ...accounts.get(id), id, name: String(input.name || id),
+        storageState: accountPaths(dataDir, id).storageState, dailyQuota: Number(input.dailyQuota) || 5,
+      })
       await login(item)
       await browserPool.invalidate(id)
       await saveAccount(dataDir, item)
@@ -353,24 +436,34 @@ const server = http.createServer(async (req, res) => {
       const windowId = String(input.windowId || randomUUID())
       if (!/^[a-zA-Z0-9_-]{1,100}$/.test(windowId)) return json(res, 400, { message: '任务窗口 ID 无效' })
       taskWindows.reserve(windowId)
-      taskWindows.update(windowId, { status: 'queued', responseText: '等待该账号前序镜头开始生成，本次消息尚未发送。' })
+      taskWindows.update(windowId, { status: 'queued', responseText: '等待该账号前序镜头开始生成，本次消息尚未发送。', accountId: item.id, requestText: String(input.prompt || ''), tracking: true })
       let result
       try {
+        await taskWindows.flush(windowId)
         result = await accountQueue.run(item.id, async generationStarted => {
           taskWindows.update(windowId, { status: 'sending', responseText: '' })
           const generated = await generate(item, String(input.prompt || ''), String(input.imageDataUrl || ''), windowId, generationStarted)
+          if (generated.status === 'completed') {
+            try {
+              await taskStore.saveVideo(windowId, await downloadTaskVideo(taskWindows.current(windowId), generated.url))
+            } catch (err) {
+              console.warn('[豆包] 视频缓存失败，保留原地址供再次保存', err)
+            }
+          }
           await writeAccountState(item, async () => {
+            refreshAccountQuota(item)
             if (generated.status === 'completed') item.usedToday += 1
             await saveAccount(dataDir, item)
           })
           return generated
         })
       } catch (error) {
-        taskWindows.update(windowId, { status: 'failed', responseText: error.message })
+        taskWindows.update(windowId, { status: 'failed', responseText: error.message, tracking: false })
         taskWindows.fail(windowId, error)
         throw error
       }
-      taskWindows.update(windowId, result)
+      taskWindows.update(windowId, { ...result, taskUrl: result.taskUrl || taskWindows.status(windowId).taskUrl || '', tracking: false, quotaCounted: result.status === 'completed' })
+      await taskWindows.flush(windowId)
       return json(res, 200, { ...result, accountName: item.name })
     }
     return json(res, 404, { message: 'Not found' })

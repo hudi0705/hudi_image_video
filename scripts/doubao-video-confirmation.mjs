@@ -1,8 +1,10 @@
 import { submitTextMessage } from './doubao-submit.mjs'
+import { videoReplyFailure } from '../src/lib/doubaoGenerationFailure.mjs'
 
 export const VIDEO_CONFIRMATION_TEXT = '确认，请按上述参数开始生成视频。'
 
 export function needsVideoConfirmation(text) {
+  if (videoReplyFailure(text)) return false
   const value = text.replace(/\s+/g, '')
   if (/无法生成|不能生成|不支持|请补充|请上传|验证码|扫码|登录|余额不足|积分不足|充值|购买|不要确认|无需确认|无需回复/.test(value)) return false
   const context = /视频生成参数确认|生成视频|视频生成|视频[^。！？]*(?:参数|方案|时长|比例)/.test(value)

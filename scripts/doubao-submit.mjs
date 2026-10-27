@@ -1,5 +1,6 @@
 import { completionErrorCodes } from './doubao-submit-response.mjs'
 import { sentMessagesForPrompt } from './doubao-message-match.mjs'
+import { videoReplyFailure } from '../src/lib/doubaoGenerationFailure.mjs'
 
 // 从主聊天页选择技能，不能使用仍可访问但提交协议过时的 create-video 专页。
 export async function submitVideoMessage(page, imagePath, prompt, confirmationTimeout = 30000, onSending = () => {}, onStage = () => {}) {
@@ -83,6 +84,7 @@ export function currentReplies(page) {
 }
 
 export function videoReplyStatus(latestReply, stable) {
+  if (stable && videoReplyFailure(latestReply)) return 'failed'
   if (/预计等待|视频生成中|正在生成|视频生成好了|生成完成/.test(latestReply)) return 'generating'
   return stable && /请确认|先确认|参数确认|确认后.*生成|请补充|直接回复|无法生成|不能生成|不支持/.test(latestReply)
     ? 'needs_attention' : 'generating'

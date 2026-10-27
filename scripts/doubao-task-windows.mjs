@@ -4,9 +4,29 @@ import { isWindowInterruption } from './doubao-window-interruption.mjs'
 export class TaskWindows {
   pages = new Map()
 
+  constructor(store) {
+    this.store = store
+  }
+
+  async load(recover) {
+    if (!this.store) return
+    for (const [id, saved] of await this.store.load()) {
+      const status = { ...saved, tracking: false }
+      if (saved.tracking) status.status = saved.status === 'queued' ? 'paused' : 'interrupted'
+      this.pages.set(id, { status, pending: null, ...recover(id, status) })
+      this.update(id, status)
+    }
+  }
+
   update(id, patch) {
     const entry = this.pages.get(id)
-    if (entry) entry.status = { ...entry.status, ...patch }
+    if (!entry) return
+    entry.status = { ...entry.status, ...patch }
+    if (this.store) void this.store.save(id, entry.status)
+  }
+
+  async flush(id) {
+    await this.store?.flush(id)
   }
 
   status(id) {
@@ -22,7 +42,7 @@ export class TaskWindows {
     if (this.pages.has(id)) throw new Error('任务窗口 ID 重复')
     let resolveReady
     const ready = new Promise(resolve => { resolveReady = resolve })
-    this.pages.set(id, { ready, resolveReady, preparing: true, pending: null, status: { status: 'sending' } })
+    this.pages.set(id, { ready, resolveReady, preparing: true, pending: null, status: { status: 'sending', tracking: true } })
   }
 
   fail(id, error) {

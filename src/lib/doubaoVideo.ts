@@ -17,7 +17,20 @@ const MAX_WAIT_MS = 300000
 const SUCCESS_STATES = new Set(['succeeded', 'success', 'completed'])
 const FAILURE_STATES = new Set(['failed', 'cancelled', 'canceled', 'expired'])
 
-export type LocalVideoProgress = { status?: string; url?: string; downloadUrl?: string; taskUrl?: string; requestText?: string; responseText?: string; accountName?: string }
+export type LocalVideoProgress = { status?: string; url?: string; downloadUrl?: string; taskUrl?: string; requestText?: string; responseText?: string; failureReason?: string; accountName?: string; tracking?: boolean }
+
+export function readLocalVideoProgress(value: unknown): LocalVideoProgress {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('任务查询返回了无效数据')
+  const data = value as Record<string, unknown>
+  if (typeof data.status !== 'string') throw new Error('任务查询未返回状态')
+  const progress: LocalVideoProgress = { status: data.status }
+  for (const key of ['url', 'downloadUrl', 'taskUrl', 'requestText', 'responseText', 'failureReason', 'accountName'] as const) {
+    if (typeof data[key] === 'string') progress[key] = data[key]
+  }
+  if (typeof data.tracking === 'boolean') progress.tracking = data.tracking
+  if (progress.status === 'completed' && !progress.url) throw new Error('视频已完成，但响应里没有视频地址')
+  return progress
+}
 
 export class DoubaoQuotaError extends Error {
   constructor(message: string) {
@@ -85,6 +98,7 @@ export async function requestDoubaoVideo(options: {
   fetchImpl?: typeof fetch
   sleep?: (ms: number) => Promise<void>
   now?: () => number
+  onTaskCreated?: (id: string) => void
 }) {
   const baseUrl = (options.baseUrl.trim() || DEFAULT_VIDEO_BASE_URL).replace(/\/$/, '')
   const prompt = options.prompt.trim()
@@ -115,6 +129,7 @@ export async function requestDoubaoVideo(options: {
   if (immediateUrl) return immediateUrl
   const taskId = readSeedanceTaskId(created.payload)
   if (!taskId) throw new Error('创建视频任务成功，但响应里没有任务 ID')
+  options.onTaskCreated?.(taskId)
 
   const deadline = now() + MAX_WAIT_MS
   let lastStatus = 'unknown'
@@ -145,14 +160,21 @@ export async function generateWithAccountRotation(options: {
   duration?: number
   ratio?: VideoRatio
   fetchImpl?: typeof fetch
+  onAccountSelected?: (id: string) => void
   onTaskWindow?: (id: string) => void
+  onApiTaskCreated?: (id: string) => void
   onProgress?: (progress: LocalVideoProgress) => void
 }) {
-  const accounts = availableAccounts(readAccounts()).filter(account => !options.accountId || account.id === options.accountId)
-  if (!accounts.length) throw new Error('没有还有今日额度的豆包账户')
+  const saved = readAccounts()
+  const available = availableAccounts(saved)
+  const preferred = available.find((account) => account.id === options.accountId)
+  const accounts = preferred ? [preferred, ...available.filter((account) => account.id !== preferred.id)] : available
+  if (!accounts.length) throw Object.assign(new Error(saved.length ? '豆包账户今日额度已用完，请明日再试或添加其他账户' : '尚未添加豆包账户，请先添加并扫码登录'), { code: 'DOUBAO_NO_ACCOUNTS' })
+  const fetchImpl = options.fetchImpl || fetch
 
   let lastMessage = '所有账户今日额度已用完'
   for (const account of accounts) {
+    options.onAccountSelected?.(account.id)
     // 请求前先记录使用时间，避免连续任务总是从列表第一个账户开始。
     const reservedAt = Date.now()
     writeAccounts(readAccounts().map((item) =>
@@ -167,18 +189,18 @@ export async function generateWithAccountRotation(options: {
         if (polling) return
         polling = true
         try {
-          const response = await fetch(`${DEFAULT_LOCAL_DOUBAO_URL}/task-window/status?windowId=${encodeURIComponent(windowId)}`, { signal: controller.signal })
+          const response = await fetchImpl(`${DEFAULT_LOCAL_DOUBAO_URL}/task-window/status?windowId=${encodeURIComponent(windowId)}`, { signal: controller.signal })
           if (response.ok) {
-            const progress = await response.json()
+            const progress = readLocalVideoProgress(await response.json())
             if (!controller.signal.aborted) options.onProgress?.(progress)
           }
-        } catch { /* The generation response remains authoritative if progress is unavailable. */ }
+        } catch { /* 进度查询失败时仍以生成接口的最终响应为准。 */ }
         finally { polling = false }
       }
       const timer = options.onProgress ? setInterval(() => { void poll() }, 1000) : undefined
       let local: Response
       try {
-        local = await fetch(`${DEFAULT_LOCAL_DOUBAO_URL}/generate`, {
+        local = await fetchImpl(`${DEFAULT_LOCAL_DOUBAO_URL}/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ accountId: account.id, windowId, prompt: options.prompt, imageDataUrl: options.imageDataUrl, ratio: options.ratio ?? DEFAULT_VIDEO_RATIO }),
@@ -189,17 +211,18 @@ export async function generateWithAccountRotation(options: {
       }
       if (local.ok) {
         const result = await local.json() as LocalVideoProgress
-        if (!result.url && !['needs_attention', 'unconfirmed', 'generating'].includes(result.status || '')) throw new Error('豆包本地服务未返回视频地址')
+        if (!result.url && !['failed', 'needs_attention', 'unconfirmed', 'generating'].includes(result.status || '')) throw new Error('豆包本地服务未返回视频地址')
         if (result.url) writeAccounts(consumeQuota(readAccounts(), account.id))
-        return { url: result.url || '', downloadUrl: result.url ? `${DEFAULT_LOCAL_DOUBAO_URL}/task-window/video?windowId=${encodeURIComponent(windowId)}` : '', status: result.status || 'completed', taskUrl: result.taskUrl || '', requestText: result.requestText || options.prompt, responseText: result.responseText || '', accountName: result.accountName || account.name }
+        return { url: result.url || '', downloadUrl: result.url ? `${DEFAULT_LOCAL_DOUBAO_URL}/task-window/video?windowId=${encodeURIComponent(windowId)}` : '', status: result.status || 'completed', taskUrl: result.taskUrl || '', requestText: result.requestText || options.prompt, responseText: result.responseText || '', failureReason: result.failureReason, accountName: result.accountName || account.name }
       }
       const localError = await local.json().catch(() => ({})) as { message?: string; code?: string }
       if (local.status === 401) throw new Error(localError.message || '豆包账号登录已过期')
       if (local.status !== 404) throw Object.assign(new Error(localError.message || '豆包本地服务失败'), { code: localError.code })
       if (!account.sessionId.trim()) throw new Error('请启动豆包本地服务并扫码登录账号')
-      const url = await requestDoubaoVideo({ ...options, account })
+      options.onTaskWindow?.('')
+      const url = await requestDoubaoVideo({ ...options, account, onTaskCreated: options.onApiTaskCreated })
       writeAccounts(consumeQuota(readAccounts(), account.id))
-      return { url, status: 'completed', accountName: account.name }
+      return { url, downloadUrl: url, status: 'completed', accountName: account.name }
     } catch (err) {
       if (!(err instanceof DoubaoQuotaError)) throw err
       writeAccounts(exhaustQuota(readAccounts(), account.id))
@@ -207,6 +230,21 @@ export async function generateWithAccountRotation(options: {
     }
   }
   throw new Error(lastMessage)
+}
+
+export async function getSeedanceVideoTask(baseUrl: string, account: DoubaoAccount, taskId: string) {
+  const task = await requestJson(fetch, `${baseUrl.trim().replace(/\/$/, '')}/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
+    headers: { Authorization: `Bearer ${account.sessionId.trim()}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(20000),
+  })
+  const status = readSeedanceStatus(task.payload).toLowerCase()
+  if (FAILURE_STATES.has(status)) return { status: 'failed', responseText: readErrorMessage(task.payload) || status, tracking: false }
+  if (SUCCESS_STATES.has(status)) {
+    const url = readVideoUrl(task.payload)
+    if (!url) throw new Error('视频已完成，但响应里没有视频地址')
+    return { status: 'completed', url, downloadUrl: url, tracking: false }
+  }
+  return { status: status === 'queued' ? 'queued' : 'generating', tracking: true }
 }
 
 async function requestJson(fetchImpl: typeof fetch, url: string, init: RequestInit) {

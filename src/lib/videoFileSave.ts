@@ -9,7 +9,7 @@ export type WritableDirectory = FileSystemDirectoryHandle & {
   queryPermission(options: { mode: 'readwrite' }): Promise<PermissionState>
   requestPermission(options: { mode: 'readwrite' }): Promise<PermissionState>
 }
-export type VideoSource = { directory: WritableDirectory; name: string; relativePath: string }
+export type VideoSource = { directory: WritableDirectory; shotDirectory?: WritableDirectory; name: string; relativePath: string }
 type DirectoryPickerWindow = Window & { showDirectoryPicker?: (options: { mode: 'readwrite' }) => Promise<WritableDirectory> }
 
 export function supportsVideoFolderSave() {
@@ -22,18 +22,20 @@ export async function pickVideoProjectFolder() {
   const root = await picker.call(window, { mode: 'readwrite' })
   const files: File[] = []
   const sources = new Map<string, VideoSource>()
-  async function visit(directory: WritableDirectory, prefix: string) {
+  async function visit(directory: WritableDirectory, prefix: string, shotDirectory?: WritableDirectory) {
     for await (const entry of directory.values()) {
       if (entry.name.startsWith('.') || entry.name === '__MACOSX') continue
       const relativePath = `${prefix}/${entry.name}`
       if (entry.kind === 'directory') {
-        await visit(entry as WritableDirectory, relativePath)
+        const child = entry as WritableDirectory
+        await visit(child, relativePath, directory === root ? child : shotDirectory)
       } else {
-        if (!getShotImageMime({ name: entry.name } as File)) continue
+        const image = getShotImageMime({ name: entry.name } as File)
+        if (!image && !/\.mp4$/i.test(entry.name)) continue
         const file = await (entry as FileSystemFileHandle).getFile()
         Object.defineProperty(file, 'webkitRelativePath', { value: relativePath })
         files.push(file)
-        sources.set(relativePath, { directory, name: entry.name, relativePath })
+        if (image) sources.set(relativePath, { directory, shotDirectory, name: entry.name, relativePath })
       }
     }
   }
@@ -56,6 +58,31 @@ export async function bindVideoProjectFolder(tasks: TaskRecord[], files: File[],
     }
   }
   return bound
+}
+
+export async function hasShotVideo(task: TaskRecord): Promise<boolean | undefined> {
+  async function hasMp4(directory: WritableDirectory): Promise<boolean> {
+    for await (const entry of directory.values()) {
+      if (entry.name.startsWith('.') || entry.name === '__MACOSX') continue
+      if (entry.kind === 'file' && /\.mp4$/i.test(entry.name)) return true
+      if (entry.kind === 'directory' && await hasMp4(entry as WritableDirectory)) return true
+    }
+    return false
+  }
+  try {
+    let checked = false
+    for (const imageId of task.outputImages) {
+      const source = await getVideoSource(task.id, imageId)
+      if (!source) continue
+      if (await hasMp4(source.shotDirectory || source.directory)) return true
+      checked = true
+      if (source.shotDirectory) return false
+    }
+    return checked ? false : task.shotHasVideo
+  } catch (err) {
+    console.warn('镜头目录的视频检查失败，请重新关联原文件夹', err)
+    return undefined
+  }
 }
 
 export async function prepareVideoSave(taskId: string, imageId: string) {

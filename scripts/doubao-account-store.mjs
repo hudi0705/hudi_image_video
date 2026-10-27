@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { quotaDate, refreshAccountQuota } from './doubao-account-quota.mjs'
 
 export function accountPaths(dir, id) {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('账号 ID 无效')
@@ -11,6 +12,7 @@ export function accountPaths(dir, id) {
 
 export async function saveAccount(dir, item) {
   const paths = accountPaths(dir, item.id)
+  refreshAccountQuota(item)
   await fs.writeFile(paths.metadata, JSON.stringify({ ...item, storageState: paths.storageState }, null, 2))
 }
 
@@ -28,6 +30,9 @@ export async function loadAccountStore(dir) {
         ? { id, name: `恢复账户 ${id}`, dailyQuota: 5, usedToday: 0, storageState: paths.storageState }
         : { ...data, id, storageState: paths.storageState }
       if (!item.name) continue
+      // 旧资料没有日期时，以文件最后保存时间恢复当天用量，不能把累计次数算到今天。
+      if (!item.quotaDate) item.quotaDate = quotaDate((await fs.stat(path.join(dir, name))).mtime)
+      refreshAccountQuota(item)
       if (session) {
         try {
           await fs.writeFile(paths.storageState, JSON.stringify(data), { flag: 'wx' })

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from 'vitest'
-import { bindVideoProjectFolder, pickVideoProjectFolder, prepareVideoSave, saveVideoBesideImage, type VideoSource, type WritableDirectory } from './videoFileSave'
+import { bindVideoProjectFolder, hasShotVideo, pickVideoProjectFolder, prepareVideoSave, saveVideoBesideImage, type VideoSource, type WritableDirectory } from './videoFileSave'
 import type { TaskRecord } from '../types'
 
 const mocks = vi.hoisted(() => ({ getSource: vi.fn(), putSource: vi.fn(), hash: vi.fn() }))
@@ -25,14 +25,42 @@ test('导入保留每张图片的实际父目录，包括镜头下的嵌套文�
   const shot = directory('镜头1').handle
   const nested = directory('成图').handle
   const image = { kind: 'file', name: '首帧.png', getFile: async () => new File(['image'], '首帧.png') }
+  const video = { kind: 'file', name: '镜头1.MP4', getFile: async () => new File(['video'], '镜头1.MP4') }
   const rootEntries = [shot]
   root.values = async function* () { yield* rootEntries }
-  shot.values = async function* () { yield nested }
+  shot.values = async function* () { yield nested; yield video as unknown as typeof nested }
   nested.values = async function* () { yield image as unknown as typeof nested }
   vi.stubGlobal('window', { showDirectoryPicker: vi.fn(async () => root) })
   const result = await pickVideoProjectFolder()
   expect(result.files[0].webkitRelativePath).toBe('项目/镜头1/成图/首帧.png')
   expect(result.sources.get(result.files[0].webkitRelativePath)?.directory).toBe(nested)
+  expect(result.sources.get(result.files[0].webkitRelativePath)?.shotDirectory).toBe(shot)
+  expect(result.files[1].webkitRelativePath).toBe('项目/镜头1/镜头1.MP4')
+  mocks.getSource.mockResolvedValue(result.sources.get(result.files[0].webkitRelativePath))
+  expect(await hasShotVideo({ id: 'task', outputImages: ['image'] } as TaskRecord)).toBe(true)
+})
+
+test('检测镜头内任意子目录的 MP4，删除后恢复无视频，旧目录和普通导入保持兼容', async () => {
+  const shot = directory('镜头1').handle
+  const nested = directory('视频').handle
+  shot.values = async function* () { yield nested }
+  const task = { id: 'task', outputImages: ['first', 'selected'], shotHasVideo: true } as TaskRecord
+  mocks.getSource.mockImplementation(async (_id, imageId) => imageId === 'selected' ? { directory: nested, shotDirectory: shot } : undefined)
+  expect(await hasShotVideo(task)).toBe(false)
+  await nested.getFileHandle('其他名称.MP4')
+  expect(await hasShotVideo(task)).toBe(true)
+  await nested.removeEntry('其他名称.MP4')
+  expect(await hasShotVideo(task)).toBe(false)
+  mocks.getSource.mockResolvedValue({ directory: nested })
+  await nested.getFileHandle('已有.mp4')
+  expect(await hasShotVideo(task)).toBe(true)
+  mocks.getSource.mockResolvedValue(undefined)
+  expect(await hasShotVideo(task)).toBe(true)
+  expect(await hasShotVideo({ ...task, shotHasVideo: false })).toBe(false)
+  nested.values = async function* () { throw new Error('权限失效') }
+  mocks.getSource.mockResolvedValue({ directory: nested })
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  expect(await hasShotVideo(task)).toBeUndefined()
 })
 
 test('视频写入首帧的父目录，重复生成使用不同文件名并完整关闭写入', async () => {
