@@ -12,8 +12,11 @@ import TaskGrid from './components/TaskGrid'
 import AgentWorkspace from './components/AgentWorkspace'
 import InputBar from './components/InputBar'
 import VideoWorkspace from './components/VideoWorkspace'
+import TopicWorkspace from './components/TopicWorkspace'
+import ShotWorkTree from './components/ShotWorkTree'
 import { useWorkMode } from './lib/workMode'
 import DetailModal from './components/DetailModal'
+import ShotPromptEditor from './components/ShotPromptEditor'
 import Lightbox from './components/Lightbox'
 import SettingsModal from './components/SettingsModal'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -143,18 +146,29 @@ export default function App() {
       <Header />
       {appMode === 'agent' ? (
         <AgentWorkspace />
-      ) : workMode === 'video' ? (
-        <VideoWorkspace />
       ) : (
-        <main data-home-main data-drag-select-surface className="pb-48">
-          <div className="safe-area-x max-w-7xl mx-auto">
-            <SearchBar />
-            {filterFavorite && !activeFavoriteCollectionId ? <FavoriteCollectionsView /> : <TaskGrid />}
+        <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_440px] lg:items-start">
+          <div className="min-w-0">
+            {workMode === 'topic' ? <TopicWorkspace /> : workMode === 'video' ? <VideoWorkspace /> : (
+              <main data-home-main data-drag-select-surface className="pb-48">
+                <div className="safe-area-x max-w-7xl mx-auto">
+                  <SearchBar />
+                  {filterFavorite && !activeFavoriteCollectionId ? <FavoriteCollectionsView /> : <TaskGrid />}
+                </div>
+              </main>
+            )}
           </div>
-        </main>
+          <aside
+            aria-label="工作树"
+            className={`hidden lg:sticky lg:top-14 lg:block lg:h-[calc(100vh-3.5rem)] lg:overflow-hidden lg:border-l lg:border-gray-200/80 lg:px-3.5 lg:pt-6 dark:lg:border-white/[0.08] ${workMode === 'image' ? 'lg:pb-44' : 'lg:pb-6'}`}
+          >
+            <ShotWorkTree />
+          </aside>
+        </div>
       )}
-      {appMode === 'agent' || workMode !== 'video' ? <InputBar /> : null}
+      {appMode === 'agent' || workMode === 'image' ? <InputBar /> : null}
       <DetailModal />
+      <ShotPromptEditor />
       <Lightbox />
       <SettingsModal />
       <ConfirmDialog />
