@@ -26,14 +26,14 @@ function WorkModeTabs({ className = '' }: { className?: string }) {
 
   return (
     <div className={`flex items-center gap-1 rounded-xl border border-gray-200 bg-gray-100/70 p-1 dark:border-white/[0.08] dark:bg-white/[0.04] ${className}`}>
-      {(['image', 'video'] as const).map((item) => (
+      {(['topic', 'image', 'video'] as const).map((item) => (
         <button
           key={item}
           type="button"
           onClick={() => select(item)}
           className={`rounded-lg px-4 py-1.5 text-sm transition-colors ${workMode === item ? 'bg-white font-medium text-gray-900 shadow-sm dark:bg-white/10 dark:text-white' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
         >
-          {item === 'image' ? '生图' : '生视频'}
+          {item === 'topic' ? '选题' : item === 'image' ? '生图' : '生视频'}
         </button>
       ))}
     </div>

@@ -3,6 +3,8 @@ import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devP
 import { appendStreamingFormatHint, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendImageToolDroppedHint, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
 import { buildPolicyReviewInput, buildPolicyReviewInstructions } from './promptPolicyAiCheck'
+import { buildTopicResearchInstructions, TOPIC_PLATFORMS } from './topicResearch'
+import { fetchTopicTrends, type TopicTrend } from './topicTrends'
 import type { PolicySet } from './promptPolicyCheck'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
@@ -766,6 +768,101 @@ export async function callPromptPolicyReviewApi(opts: {
     const payload = normalizeResponsePayload(await response.json())
     if (!payload) throw new Error('AI 检查接口返回格式无效')
     return extractText(payload)
+  } finally {
+    clearTimeout(timeoutId)
+    signal?.removeEventListener('abort', abortFromCaller)
+  }
+}
+
+/**
+ * 优先使用模型内置搜索；DeepSeek 或没有执行搜索的接口改为独立取热榜，再交给原模型筛选。
+ * 热榜取不到时明确报错，不请求模型编造热点。超时上限为 180 秒。
+ */
+export async function callTopicResearchApi(opts: {
+  profile: ApiProfile
+  input: string
+  platforms?: readonly string[]
+  signal?: AbortSignal
+}): Promise<{ text: string; searched: boolean; trends?: TopicTrend[]; notice?: string }> {
+  const { profile, input, signal } = opts
+  const proxyConfig = readClientDevProxyConfig()
+  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), Math.min(profile.timeout, 180) * 1000)
+  const abortFromCaller = () => controller.abort()
+  if (signal?.aborted) controller.abort()
+  signal?.addEventListener('abort', abortFromCaller, { once: true })
+
+  const createBody = (withWebSearch: boolean, researchInput = input) => {
+    const body: Record<string, unknown> = {
+      model: profile.model,
+      instructions: buildTopicResearchInstructions(!withWebSearch),
+      input: [
+        {
+          role: 'user',
+          content: [{ type: 'input_text', text: researchInput }],
+        },
+      ],
+    }
+    if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
+    if (withWebSearch) body.tools = [{ type: 'web_search' }]
+    return body
+  }
+
+  const send = (withWebSearch: boolean, researchInput = input) => fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    method: 'POST',
+    headers: createHeaders(profile),
+    cache: 'no-store',
+    body: JSON.stringify(createBody(withWebSearch, researchInput)),
+    signal: controller.signal,
+  })
+
+  try {
+    throwIfAborted(controller.signal)
+    if (!/deepseek/i.test(profile.model)) {
+      const response = await send(true)
+      if (response.ok) {
+        const payload = normalizeResponsePayload(await response.json())
+        if (!payload) throw new Error('选题接口返回格式无效')
+        const searched = (payload.output ?? []).some((item) => item.type === 'web_search_call' && item.status === 'completed')
+        if (searched) return { text: extractText(payload), searched: true }
+      } else if (![400, 404, 405, 422].includes(response.status) && response.status < 500) {
+        throw new Error(await getApiErrorMessage(response))
+      }
+    }
+
+    const trends = await fetchTopicTrends(opts.platforms ?? TOPIC_PLATFORMS, controller.signal)
+    throwIfAborted(controller.signal)
+    if (!trends.items.length) throw new Error(`未能获取${trends.unavailable.join('、') || '所选平台'}的实时热榜，请稍后重试；本次未生成选题。`)
+    const researchInput = `${input}\n\n以下是应用独立获取的热榜数据（获取时间：${new Date().toISOString()}），请只从中筛选：\n${JSON.stringify(trends.items)}`
+    let response = await send(false, researchInput)
+    // 部分 DeepSeek 接口只实现 Chat Completions；地址、密钥和模型仍沿用同一份生文配置。
+    if ([400, 404, 405, 422, 501].includes(response.status)) {
+      response = await fetch(buildApiUrl(profile.baseUrl, 'chat/completions', proxyConfig, useApiProxy), {
+        method: 'POST',
+        headers: createHeaders(profile),
+        cache: 'no-store',
+        body: JSON.stringify({ model: profile.model, stream: false, messages: [
+          { role: 'system', content: buildTopicResearchInstructions(true) },
+          { role: 'user', content: researchInput },
+        ] }),
+        signal: controller.signal,
+      })
+    }
+    if (!response.ok) {
+      throw new Error(await getApiErrorMessage(response))
+    }
+
+    const raw = await response.json()
+    const payload = normalizeResponsePayload(raw)
+    const text = (payload ? extractText(payload) : '') || raw?.choices?.[0]?.message?.content
+    if (typeof text !== 'string' || !text.trim()) throw new Error('选题接口未返回有效正文')
+    return {
+      text,
+      searched: true,
+      trends: trends.items,
+      notice: `已通过公开热榜获取实时词条${trends.unavailable.length ? `；${trends.unavailable.join('、')}暂时取数失败，本次未纳入` : ''}。`,
+    }
   } finally {
     clearTimeout(timeoutId)
     signal?.removeEventListener('abort', abortFromCaller)

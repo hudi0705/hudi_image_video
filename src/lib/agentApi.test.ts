@@ -1,7 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { createDefaultOpenAIProfile, DEFAULT_SETTINGS } from './apiProfiles'
-import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments } from './agentApi'
+import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, callTopicResearchApi, parseBatchImageCallArguments } from './agentApi'
+import { fetchTopicTrends } from './topicTrends'
+
+vi.mock('./topicTrends', () => ({ fetchTopicTrends: vi.fn() }))
 
 describe('parseBatchImageCallArguments', () => {
   it('trims ids and prompts, fills missing ids, and skips empty prompts', () => {
@@ -32,6 +35,121 @@ describe('parseBatchImageCallArguments', () => {
       { id: 'same_3', prompt: 'four' },
     ])
     expect(parseBatchImageCallArguments(args)).toEqual(parseBatchImageCallArguments(args))
+  })
+})
+
+describe('callTopicResearchApi', () => {
+  beforeEach(() => {
+    vi.mocked(fetchTopicTrends).mockReset().mockResolvedValue({
+      items: [{ title: '钠电池上车', platform: '抖音', heat: '抖音热榜第 12 位', source: 'https://www.douyin.com/search/test' }],
+      unavailable: [],
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('中转不认 web_search 时独立取热榜，再用原模型筛选', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'Unknown tool type: web_search' } }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_topic',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: '{"note":"没联网","topics":[]}' }] }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await callTopicResearchApi({
+      profile: createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' }),
+      input: '方向：不限',
+    })
+
+    expect(result.searched).toBe(true)
+    expect(result.trends?.[0].title).toBe('钠电池上车')
+    expect(result.text).toContain('topics')
+    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
+    const secondBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
+    expect(firstBody.tools).toEqual([{ type: 'web_search' }])
+    expect(secondBody.tools).toBeUndefined()
+    expect(secondBody.input[0].content[0].text).toContain('钠电池上车')
+    expect(secondBody.instructions).toContain('不需要调用联网工具')
+  })
+
+  it('识别 web_search_call 输出项，说明这次真的搜过', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_topic',
+      output: [
+        { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search' } },
+        { type: 'message', content: [{ type: 'output_text', text: '{"topics":[]}' }] },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await callTopicResearchApi({
+      profile: createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' }),
+      input: '方向：不限',
+    })
+
+    expect(result.searched).toBe(true)
+    expect(fetchTopicTrends).not.toHaveBeenCalled()
+  })
+
+  it('DeepSeek v4.1 直接筛选热榜，不强塞 web_search 或切换模型', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      output: [{ type: 'message', content: [{ type: 'output_text', text: '{"topics":[]}' }] }],
+    })))
+    const profile = createDefaultOpenAIProfile({ baseUrl: 'https://text.example/v1', apiKey: 'text-key', model: 'cn:deepseek-v4.1-flash' })
+    await callTopicResearchApi({ profile, input: '方向：电池', platforms: ['抖音'] })
+
+    expect(fetchTopicTrends).toHaveBeenCalledWith(['抖音'], expect.any(AbortSignal))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://text.example/v1/responses')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer text-key' })
+    expect(JSON.parse(String(init.body))).toMatchObject({ model: 'cn:deepseek-v4.1-flash' })
+    expect(JSON.parse(String(init.body)).tools).toBeUndefined()
+  })
+
+  it('Responses 不可用时兼容 DeepSeek Chat Completions', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('Not found', { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: '{"topics":[]}' } }] })))
+    const result = await callTopicResearchApi({ profile: createDefaultOpenAIProfile({ model: 'deepseek-v4.1' }), input: '方向：不限' })
+
+    expect(result.text).toBe('{"topics":[]}')
+    expect(fetchMock.mock.calls[1][0]).toContain('/chat/completions')
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body))
+    expect(body.model).toBe('deepseek-v4.1')
+    expect(body.messages[1].content).toContain('钠电池上车')
+    expect(body.tools).toBeUndefined()
+  })
+
+  it('有搜索输出但状态失败时仍取独立热榜，并保留缺失平台提示', async () => {
+    vi.mocked(fetchTopicTrends).mockResolvedValue({
+      items: [{ title: '钠电池上车', platform: '抖音', heat: '抖音热榜第 12 位', source: '' }],
+      unavailable: ['B站'],
+    })
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ output: [{ type: 'web_search_call', status: 'failed' }] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: '{"topics":[]}' }] }] })))
+    const result = await callTopicResearchApi({ profile: createDefaultOpenAIProfile(), input: '方向：不限' })
+
+    expect(fetchTopicTrends).toHaveBeenCalledTimes(1)
+    expect(result.notice).toContain('B站暂时取数失败')
+  })
+
+  it('全部热榜失败时停止，不请求模型生成虚构热点', async () => {
+    vi.mocked(fetchTopicTrends).mockResolvedValue({ items: [], unavailable: ['抖音'] })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    await expect(callTopicResearchApi({ profile: createDefaultOpenAIProfile({ model: 'deepseek-v4.1' }), input: '方向：不限' })).rejects.toThrow('未能获取抖音的实时热榜')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('取消后不再取热榜或请求模型', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    await expect(callTopicResearchApi({ profile: createDefaultOpenAIProfile({ model: 'deepseek-v4.1' }), input: '', signal: controller.signal })).rejects.toThrow()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetchTopicTrends).not.toHaveBeenCalled()
   })
 })
 

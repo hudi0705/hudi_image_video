@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-export type WorkMode = 'image' | 'video'
+export type WorkMode = 'topic' | 'image' | 'video'
 
 const KEY = 'gpt-image-work-mode'
 const listeners = new Set<() => void>()
@@ -8,7 +8,8 @@ let mode: WorkMode = readStoredWorkMode()
 
 function readStoredWorkMode(): WorkMode {
   try {
-    return localStorage.getItem(KEY) === 'video' ? 'video' : 'image'
+    const stored = localStorage.getItem(KEY)
+    return stored === 'video' || stored === 'topic' ? stored : 'image'
   } catch {
     return 'image'
   }
