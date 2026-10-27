@@ -49,6 +49,7 @@ import {
   putVideoSource,
 } from './lib/db'
 import type { VideoSource } from './lib/videoFileSave'
+import { loadVideoTasks, removeVideoTasks, useVideoTaskStore } from './lib/videoTaskStore'
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
@@ -121,7 +122,7 @@ function isErrorToastTitle(title: string): boolean {
   return /(?:失败|错误|异常|报错|无法|不能|超时|中断|断开|请先|请输入|已达上限|不存在|已丢失)$/.test(title)
 }
 
-export type SettingsTab = 'general' | 'agent' | 'api' | 'data' | 'about'
+export type SettingsTab = 'general' | 'agent' | 'api' | 'text' | 'data' | 'about'
 
 const TIMEOUT_STREAMING_HINT = '也可尝试打开「流式传输」，并提高「请求中间步骤图像数」来维持连接。'
 const TIMEOUT_PARTIAL_IMAGES_ZERO_HINT = '官方流式接口不发送心跳，当前「请求中间步骤图像数」为 0，连接可能因无数据传输而断开。建议提高到 2 或 3。'
@@ -404,6 +405,8 @@ interface AppState {
   // UI
   detailTaskId: string | null
   setDetailTaskId: (id: string | null) => void
+  shotEditTaskId: string | null
+  setShotEditTaskId: (id: string | null) => void
   lightboxImageId: string | null
   lightboxImageList: string[]
   /** 预览参考图时对应的提示词，按图片在列表中的位置取其评论；为空时不显示评论 */
@@ -1005,6 +1008,11 @@ export const useStore = create<AppState>()(
       setDetailTaskId: (detailTaskId) => {
         if (detailTaskId) dismissAllTooltips()
         set({ detailTaskId })
+      },
+      shotEditTaskId: null,
+      setShotEditTaskId: (shotEditTaskId) => {
+        if (shotEditTaskId) dismissAllTooltips()
+        set({ shotEditTaskId })
       },
       lightboxImageId: null,
       lightboxImageList: [],
@@ -1951,6 +1959,7 @@ export async function importShotProjectFolder(files: File[], onProgress?: (compl
       createdAt: createdAt - importedShots, finishedAt: createdAt, elapsed: null,
       sourceMode: 'gallery', shotProjectName: project.projectName,
       shotBatchId: batchId, shotIndex: shot.index, shotAction: '', shotAudio: '',
+      shotHasVideo: shot.hasVideo,
     }
     await putTask(task)
     const latest = useStore.getState()
@@ -1976,6 +1985,23 @@ export async function updateShotVideoDetails(updates: Array<{ id: string; shotAc
   await Promise.all(changed.map((task) => putTask(task)))
 }
 
+export async function updateShotImagePrompt(taskId: string, sharedPrompt: string, shotPrompt: string) {
+  const task = useStore.getState().tasks.find((item) => item.id === taskId)
+  if (!task) throw new Error('镜头已被删除')
+  if (task.status === 'running' || task.falRecoverable || task.customRecoverable) throw new Error('请等待当前镜头生成结束后再保存')
+  if (!shotPrompt.trim()) throw new Error('请填写镜头语言')
+  const prompt = buildShotImagePrompt(shotPrompt, task.inputImageIds.length > 0, sharedPrompt)
+  const patch = {
+    prompt,
+    shotSharedPrompt: sharedPrompt.trim(),
+    shotPrompt: shotPrompt.trim(),
+    transparentPrompt: task.transparentOutput ? createTransparentOutputMeta(prompt).effectivePrompt : task.transparentPrompt,
+  }
+  await putTask({ ...task, ...patch })
+  const latest = useStore.getState()
+  latest.setTasks(latest.tasks.map((item) => item.id === taskId ? { ...item, ...patch } : item))
+}
+
 export async function submitShotBatch(shots: Array<{ index?: number; shot: string; action?: string; sound?: string; duration?: number }>, styleImages: InputImage[], projectName = '', sharedPrompt = '') {
   const state = useStore.getState()
   const normalizedSettings = normalizeSettings(state.settings)
@@ -1991,6 +2017,7 @@ export async function submitShotBatch(shots: Array<{ index?: number; shot: strin
   const prompts = shots
     .map((shot) => ({
       prompt: buildShotImagePrompt(shot.shot, styleImages.length > 0, sharedPrompt).trim(),
+      shotPrompt: shot.shot.trim(),
       action: shot.action?.trim() || '',
       sound: shot.sound?.trim() || '',
       index: shot.index,
@@ -2051,6 +2078,8 @@ export async function submitShotBatch(shots: Array<{ index?: number; shot: strin
       shotProjectName,
       shotBatchId: batchId,
       shotIndex: shot.index ?? index + 1,
+      shotSharedPrompt: sharedPrompt.trim(),
+      shotPrompt: shot.shotPrompt,
       shotAction: shot.action,
       shotAudio: shot.sound,
       shotDuration: shot.duration,
@@ -4160,6 +4189,14 @@ export async function retryTask(task: TaskRecord) {
     ...(overwrite ? source : {}),
     id: taskId,
     prompt: source.prompt,
+    shotProjectName: source.shotProjectName,
+    shotBatchId: source.shotBatchId,
+    shotIndex: source.shotIndex,
+    shotSharedPrompt: source.shotSharedPrompt,
+    shotPrompt: source.shotPrompt,
+    shotAction: source.shotAction,
+    shotAudio: source.shotAudio,
+    shotDuration: source.shotDuration,
     params: taskParams,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
@@ -4293,8 +4330,12 @@ export async function reuseConfig(task: TaskRecord) {
   )
 }
 
-/** 编辑输出：将输出图加入输入 */
+/** 镜头任务编辑提示词，其他任务将输出图加入输入 */
 export async function editOutputs(task: TaskRecord) {
+  if (task.shotIndex !== undefined || task.shotBatchId) {
+    useStore.getState().setShotEditTaskId(task.id)
+    return
+  }
   const { inputImages, addInputImage, showToast } = useStore.getState()
   if (!task.outputImages?.length) return
 
@@ -4512,6 +4553,7 @@ async function removeTasks(taskIds: string[], updateState?: TaskDeletionStateUpd
     ...cleanup,
     updatedConversations: [...updatedConversations.values()],
   })
+  removeVideoTasks(deletedTasks.map((task) => task.id))
   await deleteUnreferencedImageIds(deletedImageIds)
   return deletedTasks.length
 }
@@ -4572,6 +4614,8 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   if (options.clearTasks) {
     await dbClearTasks()
+    loadVideoTasks()
+    removeVideoTasks(Object.keys(useVideoTaskStore.getState().records))
     await dbClearAgentConversations()
     await clearImages()
     clearImageCaches()

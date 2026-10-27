@@ -9,6 +9,13 @@ import { deleteAgentRoundFromConversation, getActiveAgentRounds, getAgentConvers
 import { cleanStaleAgentInputDrafts } from './lib/inputDraftState'
 import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
+import { removeVideoTasks } from './lib/videoTaskStore'
+import { buildShotImagePrompt } from './lib/shotTemplate'
+vi.mock('./lib/videoTaskStore', () => ({
+  loadVideoTasks: vi.fn(),
+  removeVideoTasks: vi.fn(),
+  useVideoTaskStore: { getState: () => ({ records: {} }) },
+}))
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -136,7 +143,7 @@ import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, retryTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, submitShotBatch, taskMatchesFilterStatus, taskMatchesSearchQuery, updateShotImagePrompt, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -274,6 +281,68 @@ describe('favorite collection deletion', () => {
       favoriteCollectionIds: [collectionB.id],
     })
     expect((await getAllTasks()).map((item) => item.id)).toEqual([sharedTask.id])
+  })
+})
+
+describe('shot prompt editing', () => {
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockReset()
+    useStore.setState({
+      settings: { ...DEFAULT_SETTINGS, baseUrl: 'https://api.example.com/v1', apiKey: 'test-key' },
+      params: { ...DEFAULT_PARAMS },
+      tasks: [], inputImages: [], shotEditTaskId: null, showToast: vi.fn(),
+    })
+  })
+
+  it('opens failed shots without requiring an output image or changing the input draft', async () => {
+    const failed = task({ status: 'error', shotIndex: 1 })
+    useStore.setState({ tasks: [failed], prompt: '输入框草稿', inputImages: [imageA] })
+    await editOutputs(failed)
+    expect(useStore.getState().shotEditTaskId).toBe(failed.id)
+    expect(useStore.getState().prompt).toBe('输入框草稿')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it('persists the edit only on the current shot and updates its transparent request prompt', async () => {
+    const current = task({ status: 'error', shotIndex: 1, inputImageIds: ['style'], transparentOutput: true })
+    const other = task({ id: 'other', shotIndex: 2, prompt: '其他镜头' })
+    useStore.setState({ tasks: [current, other] })
+    await putDbTask(other)
+    await updateShotImagePrompt(current.id, '  新通用提示词  ', '  钥匙特写  ')
+    const prompt = buildShotImagePrompt('钥匙特写', true, '新通用提示词')
+    expect(useStore.getState().tasks[0]).toMatchObject({ prompt, shotSharedPrompt: '新通用提示词', shotPrompt: '钥匙特写', transparentPrompt: `transparent:${prompt}`, status: 'error' })
+    expect(useStore.getState().tasks[1]).toEqual(other)
+    expect(await getAllTasks()).toEqual(expect.arrayContaining([useStore.getState().tasks[0], other]))
+    expect(callImageApi).not.toHaveBeenCalled()
+  })
+
+  it.each(['new', 'overwriteFailed'] as const)('retries the saved prompt with its shot metadata in %s mode', async (retryMode) => {
+    const failed = task({ status: 'error', shotIndex: 3, shotProjectName: '项目', shotBatchId: 'batch', shotAction: '推进', shotAudio: '风声', shotDuration: 5 })
+    useStore.setState({ settings: { ...useStore.getState().settings, retryMode }, tasks: [failed] })
+    await updateShotImagePrompt(failed.id, '新风格', '新镜头')
+    vi.mocked(callImageApi).mockResolvedValueOnce({ images: [], actualParams: {}, actualParamsList: [], revisedPrompts: [] })
+    await retryTask(failed)
+    await vi.waitFor(() => expect(useStore.getState().tasks[0].status).toBe('done'))
+    expect(callImageApi).toHaveBeenCalledWith(expect.objectContaining({ prompt: '新风格\n新镜头' }))
+    expect(useStore.getState().tasks[0]).toMatchObject({ shotIndex: 3, shotProjectName: '项目', shotBatchId: 'batch', shotSharedPrompt: '新风格', shotPrompt: '新镜头', shotAction: '推进', shotAudio: '风声', shotDuration: 5 })
+  })
+
+  it('stores separate prompt fields when submitting a shot batch', async () => {
+    vi.mocked(callImageApi).mockResolvedValue({ images: [], actualParams: {}, actualParamsList: [], revisedPrompts: [] })
+    await submitShotBatch([{ index: 1, shot: '钥匙特写' }, { index: 2, shot: '工作台全景' }], [imageA], '项目', '油画风格')
+    await vi.waitFor(() => expect(useStore.getState().tasks.every((item) => item.status === 'done')).toBe(true))
+    expect(useStore.getState().tasks.map((item) => [item.shotSharedPrompt, item.shotPrompt])).toEqual([['油画风格', '钥匙特写'], ['油画风格', '工作台全景']])
+  })
+
+  it('rejects saving a running shot or an empty shot prompt', async () => {
+    const current = task({ shotIndex: 1, status: 'running' })
+    useStore.setState({ tasks: [current] })
+    await expect(updateShotImagePrompt(current.id, '风格', '镜头')).rejects.toThrow('生成结束')
+    useStore.setState({ tasks: [{ ...current, status: 'error' }] })
+    await expect(updateShotImagePrompt(current.id, '风格', '  ')).rejects.toThrow('镜头语言')
+    expect(await getAllTasks()).toEqual([])
   })
 })
 
@@ -4132,6 +4201,7 @@ describe('task deletion', () => {
     expect(state.selectedTaskIds).toEqual([])
     expect((await getAllTasks()).map((item) => item.id)).toEqual([remaining.id])
     expect(state.showToast).toHaveBeenCalledWith('已删除 1 个任务', 'success')
+    expect(removeVideoTasks).toHaveBeenLastCalledWith([deleted.id])
   })
 
   it('does not show a success toast when no task id exists', async () => {
