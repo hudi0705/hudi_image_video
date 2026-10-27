@@ -9,13 +9,14 @@ export default function SupportPromptModal() {
   const dismissSupportPrompt = useStore((s) => s.dismissSupportPrompt)
   const confirmDialog = useStore((s) => s.confirmDialog)
   const detailTaskId = useStore((s) => s.detailTaskId)
+  const shotEditTaskId = useStore((s) => s.shotEditTaskId)
   const lightboxImageId = useStore((s) => s.lightboxImageId)
   const showSettings = useStore((s) => s.showSettings)
   const maskEditorImageId = useStore((s) => s.maskEditorImageId)
   const sketchBoard = useStore((s) => s.sketchBoard)
 
   const blockedByHigherPriorityModal = Boolean(
-    confirmDialog || detailTaskId || lightboxImageId || showSettings || maskEditorImageId || sketchBoard,
+    confirmDialog || detailTaskId || shotEditTaskId || lightboxImageId || showSettings || maskEditorImageId || sketchBoard,
   )
   const visible = supportPromptOpen && !blockedByHigherPriorityModal
 

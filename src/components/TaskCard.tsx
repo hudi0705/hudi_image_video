@@ -694,10 +694,10 @@ export default function TaskCard({
                 </svg>
               </TaskActionButton>
               <TaskActionButton
-                tooltip="编辑输出"
+                tooltip={task.shotIndex !== undefined || task.shotBatchId ? '编辑镜头' : '编辑输出'}
                 onClick={onEditOutputs}
                 className="p-1.5 rounded-md hover:bg-green-50 dark:hover:bg-green-950/30 text-gray-400 hover:text-green-500 transition disabled:opacity-30"
-                disabled={!task.outputImages?.length}
+                disabled={task.shotIndex === undefined && !task.shotBatchId && !task.outputImages?.length}
               >
                 <svg
                   className="w-4 h-4"
