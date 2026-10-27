@@ -88,3 +88,25 @@ test('每个规则集都有唯一 id 与来源说明', () => {
     expect(set.rules.length).toBeGreaterThan(3)
   }
 })
+
+test('中文商业与科技名人姓名两套规则都能识别', () => {
+  // 用户最常写的句式：只出现中文姓名，没有任何「明星/网红」这类泛称
+  const text = '马斯克公开表达过对人工智能风险的担忧'
+  for (const setId of ['openai', 'doubao'] as const) {
+    const result = checkText(text, setId)
+    expect(result.blocked).toBe(true)
+    expect(result.hits.some((hit) => hit.rule.id === `${setId}-real-person`)).toBe(true)
+    expect(result.hits.find((hit) => hit.rule.id === `${setId}-real-person`)?.matched).toBe('马斯克')
+  }
+})
+
+test('中文名人的中英覆盖一致：逐个姓名在两套规则下都命中', () => {
+  const names = ['马斯克', '雷军', '马云', '马化腾', '李彦宏', '张一鸣', '刘强东', '董明珠', '王传福', '张朝阳', '周鸿祎']
+  for (const name of names) {
+    for (const setId of ['openai', 'doubao'] as const) {
+      const result = checkText(`画一张${name}的肖像`, setId)
+      expect(result.blocked, `${setId} 漏掉 ${name}`).toBe(true)
+      expect(result.hits.map((hit) => hit.rule.id), `${setId} 漏掉 ${name}`).toContain(`${setId}-real-person`)
+    }
+  }
+})

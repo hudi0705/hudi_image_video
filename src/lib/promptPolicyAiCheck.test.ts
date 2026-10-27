@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { buildPolicyReviewInput, buildPolicyReviewInstructions, parsePolicyReviewResult } from './promptPolicyAiCheck'
+import { applyRewrite, buildPolicyReviewInput, buildPolicyReviewInstructions, parsePolicyReviewResult } from './promptPolicyAiCheck'
 import { POLICY_SETS } from './promptPolicyCheck'
 
 const openaiSet = POLICY_SETS.find((set) => set.id === 'openai')!
@@ -73,7 +73,7 @@ test('字段缺失时补安全默认值', () => {
   // risk 缺失时按 items 反推：没有 block 条目即 warn
   expect(result.risk).toBe('warn')
   expect(result.summary).toBe('')
-  expect(result.items[0]).toEqual({ label: '', severity: 'warn', quote: '', reason: '', suggestion: '' })
+  expect(result.items[0]).toEqual({ label: '', severity: 'warn', quote: '', reason: '', suggestion: '', rewrite: '' })
   expect(result.items[1].label).toBe('血腥')
 })
 
@@ -92,4 +92,42 @@ test('items 超过 5 条时截断到 5 条', () => {
   const items = Array.from({ length: 8 }, (_, index) => ({ label: `风险${index}`, severity: 'warn' }))
   const result = parsePolicyReviewResult(JSON.stringify({ risk: 'warn', items }))
   expect(result.items).toHaveLength(5)
+})
+
+test('rewrite 字段缺失时补空串', () => {
+  const result = parsePolicyReviewResult(JSON.stringify({ risk: 'warn', items: [{ label: 'A', quote: '原文', reason: 'r', suggestion: 's' }] }))
+  expect(result.items[0].rewrite).toBe('')
+})
+
+test('rewrite 字段非字符串时补空串', () => {
+  const result = parsePolicyReviewResult(JSON.stringify({ risk: 'warn', items: [{ label: 'A', rewrite: 123 }] }))
+  expect(result.items[0].rewrite).toBe('')
+})
+
+test('rewrite 字段正常解析', () => {
+  const result = parsePolicyReviewResult(JSON.stringify({ risk: 'warn', items: [{ label: 'A', quote: 'Taylor Swift', rewrite: '一位虚构歌手' }] }))
+  expect(result.items[0].rewrite).toBe('一位虚构歌手')
+})
+
+// ===== applyRewrite =====
+
+test('applyRewrite 替换 quote 第一次出现', () => {
+  expect(applyRewrite('画 Taylor Swift 和 Taylor Swift 的合影', 'Taylor Swift', '一位虚构歌手'))
+    .toBe('画 一位虚构歌手 和 Taylor Swift 的合影')
+})
+
+test('applyRewrite quote 找不到返回 null', () => {
+  expect(applyRewrite('画一只猫', 'Taylor Swift', '一位虚构歌手')).toBeNull()
+})
+
+test('applyRewrite quote 为空返回 null', () => {
+  expect(applyRewrite('画一只猫', '', '一位虚构歌手')).toBeNull()
+})
+
+test('applyRewrite rewrite 为空串时删除 quote', () => {
+  expect(applyRewrite('画 Taylor Swift 的照片', 'Taylor Swift', '')).toBe('画  的照片')
+})
+
+test('applyRewrite 文本多次出现只替换第一次', () => {
+  expect(applyRewrite('皮卡丘和皮卡丘站在一起', '皮卡丘', '黄色电气小兽')).toBe('黄色电气小兽和皮卡丘站在一起')
 })

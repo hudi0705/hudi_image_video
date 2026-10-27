@@ -1,6 +1,7 @@
 // 提示词 AI 深度检查：本地关键词只能覆盖显性表述，语义擦边（例如"两个人靠得很近，气氛暧昧"）需要模型判断
 // 这里只放纯函数（instructions / input / 解析），网络请求在 agentApi 里，方便单独测试与复用
 
+import { parseJsonObject } from './looseJson'
 import type { PolicySet } from './promptPolicyCheck'
 
 export type PolicyReviewRisk = 'safe' | 'warn' | 'block'
@@ -11,6 +12,8 @@ export type PolicyReviewItem = {
   quote: string
   reason: string
   suggestion: string
+  /** 把 quote 改写成的安全文本，要求能直接替换原文中的 quote 且保持上下文通顺；缺失或无需改动时为空串 */
+  rewrite: string
 }
 
 export type PolicyReviewResult = {
@@ -36,9 +39,10 @@ export function buildPolicyReviewInstructions(set: PolicySet): string {
     '',
     '## 输出要求',
     '- 严格只输出一个 JSON 对象，不要任何解释性文字、不要 Markdown 代码围栏、不要前后缀。',
-    '- JSON 形状：{"risk":"safe" | "warn" | "block","summary":"一句话结论","items":[{"label":"风险点名称","severity":"block" | "warn","quote":"原文片段","reason":"为什么","suggestion":"怎么改"}]}',
+    '- JSON 形状：{"risk":"safe" | "warn" | "block","summary":"一句话结论","items":[{"label":"风险点名称","severity":"block" | "warn","quote":"原文片段","reason":"为什么","suggestion":"怎么改","rewrite":"安全改写"}]}',
     '- risk 取三项中最严重的等级；items 最多 5 条，按严重程度降序排列。',
     '- quote 必须逐字摘自提示词原文，不要改写；reason 说明会被哪个判据命中；suggestion 给出可直接替换的中文改写建议。',
+    '- rewrite 是把 quote 改写成的安全文本，要求能直接替换原文中的 quote 且保持上下文通顺；如果该条无需改动原文就返回空字符串。',
     '- 如果不存在任何风险，输出 {"risk":"safe","summary":"一句话结论","items":[]}。',
   ].join('\n')
 }
@@ -75,6 +79,7 @@ function normalizeItem(value: unknown): PolicyReviewItem {
     quote: readString(record.quote),
     reason: readString(record.reason),
     suggestion: readString(record.suggestion),
+    rewrite: readString(record.rewrite),
   }
 }
 
@@ -85,28 +90,20 @@ function normalizeRisk(value: unknown, items: PolicyReviewItem[]): PolicyReviewR
   return items.length > 0 ? 'warn' : 'safe'
 }
 
-/** 容错解析：模型可能用 ```json 围栏包裹，也可能在前后带说明文字 */
-function parseJsonObject(raw: string): unknown {
-  const text = typeof raw === 'string' ? raw.trim() : ''
-  if (!text) throw new Error('AI 检查返回格式无效')
-  try {
-    return JSON.parse(text)
-  } catch {
-    // 整体解析失败，截取第一个 { 到最后一个 } 再试一次
-  }
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start === -1 || end <= start) throw new Error('AI 检查返回格式无效')
-  try {
-    return JSON.parse(text.slice(start, end + 1))
-  } catch {
-    throw new Error('AI 检查返回格式无效')
-  }
+/**
+ * 把 text 中 quote 的第一次出现替换成 rewrite。
+ * quote 为空或找不到时返回 null，方便调用方判断替换是否成功；rewrite 为空串表示删除该片段。
+ */
+export function applyRewrite(text: string, quote: string, rewrite: string): string | null {
+  if (!quote) return null
+  const index = text.indexOf(quote)
+  if (index === -1) return null
+  return text.slice(0, index) + rewrite + text.slice(index + quote.length)
 }
 
 /** 解析模型返回的审核结果，任何脏数据都要降级成可用结构而不是抛错 */
 export function parsePolicyReviewResult(raw: string): PolicyReviewResult {
-  const data = parseJsonObject(raw)
+  const data = parseJsonObject(raw, 'AI 检查')
   const record = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>
   const rawItems = Array.isArray(record.items) ? record.items : []
   const items = rawItems.slice(0, 5).map(normalizeItem)

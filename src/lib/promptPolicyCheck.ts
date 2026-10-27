@@ -45,7 +45,8 @@ const OPENAI_RULES: PolicyRule[] = [
     category: '真实人物与肖像',
     severity: 'block',
     label: '真实公众人物姓名',
-    pattern: words(['泰勒·?斯威夫特', '泰勒斯威夫特', 'Taylor\\s*Swift', 'Elon\\s*Musk', 'Donald\\s*Trump', 'Joe\\s*Biden', 'Vladimir\\s*Putin', '肖战', '王一博', '杨幂', '赵丽颖', '迪丽热巴', '易烊千玺', '刘德华', '周杰伦', '成龙', '邓紫棋', '蔡徐坤', '吴京', '巩俐', '谷爱凌', '姚明', 'Messi', 'Ronaldo']),
+    // 中文名人必须与英文名一起覆盖：只写 Elon\s*Musk 会漏掉最常见的「马斯克」写法
+    pattern: words(['泰勒·?斯威夫特', '泰勒斯威夫特', '马斯克', '雷军', '马云', '马化腾', '李彦宏', '张一鸣', '刘强东', '董明珠', '王传福', '张朝阳', '周鸿祎', 'Taylor\\s*Swift', 'Elon\\s*Musk', 'Donald\\s*Trump', 'Joe\\s*Biden', 'Vladimir\\s*Putin', '肖战', '王一博', '杨幂', '赵丽颖', '迪丽热巴', '易烊千玺', '刘德华', '周杰伦', '成龙', '邓紫棋', '蔡徐坤', '吴京', '巩俐', '谷爱凌', '姚明', 'Messi', 'Ronaldo']),
     reason: 'OpenAI 默认拒绝生成可识别的真实公众人物形象，包括政治人物、明星、运动员。',
     suggestion: '改写成不含姓名的外貌描述，例如「一位三十岁左右的短发男性」。用同音字或拼音通常也无法规避。',
   },
@@ -138,7 +139,8 @@ const DOUBAO_RULES: PolicyRule[] = [
     category: '真实人物与肖像',
     severity: 'block',
     label: '真实人物 / 明星肖像',
-    pattern: words(['明星', '网红', '公众人物', '演员', '歌手', '偶像', '艺人', '名人', '真人肖像', '本人照片', '换脸', '模仿.{0,4}(声音|口吻|语气)', '数字分身', 'Taylor\\s*Swift', 'Elon\\s*Musk', 'Donald\\s*Trump', 'Joe\\s*Biden', 'Vladimir\\s*Putin', 'Messi', 'Ronaldo', '演唱会照片', '见面会照片']),
+    // 与 openai-real-person 保持同名覆盖：只有「明星/网红」这类泛称时会漏掉具体姓名
+    pattern: words(['明星', '网红', '公众人物', '演员', '歌手', '偶像', '艺人', '名人', '真人肖像', '本人照片', '换脸', '模仿.{0,4}(声音|口吻|语气)', '数字分身', '马斯克', '雷军', '马云', '马化腾', '李彦宏', '张一鸣', '刘强东', '董明珠', '王传福', '张朝阳', '周鸿祎', 'Taylor\\s*Swift', 'Elon\\s*Musk', 'Donald\\s*Trump', 'Joe\\s*Biden', 'Vladimir\\s*Putin', 'Messi', 'Ronaldo', '演唱会照片', '见面会照片']),
     reason: '豆包自 2026 年 2 月起全平台收紧：禁止生成明星、公众人物、网红等真实人物的肖像、声音与视频，采用关键词拦截 + 人脸比对 + 内容审核三重机制，命中即拒绝。',
     suggestion: '改为虚构角色，避免出现「明星感」「某某同款」这类指向性描述；真人素材需先取得本人授权并完成平台认证。',
   },
